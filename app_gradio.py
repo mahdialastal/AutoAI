@@ -1,4 +1,4 @@
-"""Simple Gradio UI for AutoShorts - upload or paste URL, get shorts."""
+"""Simple Gradio UI for MarkSoft AutoShorts — upload or paste URL, get shorts."""
 from __future__ import annotations
 
 import json
@@ -98,8 +98,12 @@ def preview_manual_regions(
     c_top: float,
     c_right: float,
     c_bottom: float,
+    m_left: float,
+    m_top: float,
+    m_right: float,
+    m_bottom: float,
 ):
-    """Draw webcam and chat regions on a frame from the video. Returns RGB image or None."""
+    """Draw webcam, chat, and middle (gap fill) regions on a frame. Returns RGB image or None."""
     if input_mode == "YouTube URL":
         src = (url or "").strip()
     else:
@@ -110,7 +114,6 @@ def preview_manual_regions(
     if not src or not src.strip():
         return None
     src = src.strip()
-    # Resolve path (may download for URL)
     try:
         path = get_video_path(src, download_dir=APP_ROOT / "downloads")
     except Exception:
@@ -118,7 +121,7 @@ def preview_manual_regions(
     cap = cv2.VideoCapture(str(path))
     if not cap.isOpened():
         return None
-    cap.set(cv2.CAP_PROP_POS_MSEC, 5000.0)  # 5 seconds
+    cap.set(cv2.CAP_PROP_POS_MSEC, 5000.0)
     ok, frame = cap.read()
     cap.release()
     if not ok or frame is None:
@@ -126,21 +129,27 @@ def preview_manual_regions(
     h, w = frame.shape[:2]
     if w <= 0 or h <= 0:
         return None
-    # Convert % (0-100) to 0-1, then to pixels
     def pct(x):
-        return max(0, min(100, float(x))) / 100.0
+        return max(0, min(100, float(x or 0))) / 100.0
     wl, wt, wr, wb = pct(w_left), pct(w_top), pct(w_right), pct(w_bottom)
     cl, ct, cr, cb = pct(c_left), pct(c_top), pct(c_right), pct(c_bottom)
+    ml, mt, mr, mb = pct(m_left), pct(m_top), pct(m_right), pct(m_bottom)
     img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    # Draw webcam box (green), chat box (blue)
+    # Webcam = green
     x1, y1 = int(wl * w), int(wt * h)
     x2, y2 = int(wr * w), int(wb * h)
     cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 3)
     cv2.putText(img, "Webcam", (x1, y1 - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+    # Chat = orange
     x1, y1 = int(cl * w), int(ct * h)
     x2, y2 = int(cr * w), int(cb * h)
-    cv2.rectangle(img, (x1, y1), (x2, y2), (0, 165, 255), 3)  # orange
+    cv2.rectangle(img, (x1, y1), (x2, y2), (0, 165, 255), 3)
     cv2.putText(img, "Chat", (x1, y1 - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 165, 255), 2)
+    # Middle (gap fill) = blue
+    x1, y1 = int(ml * w), int(mt * h)
+    x2, y2 = int(mr * w), int(mb * h)
+    cv2.rectangle(img, (x1, y1), (x2, y2), (0, 180, 255), 3)  # RGB blue
+    cv2.putText(img, "Middle (gap)", (x1, y1 - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 180, 255), 2)
     return img
 
 
@@ -362,10 +371,10 @@ def run_ui(
 
 
 def build_ui() -> gr.Blocks:
-    with gr.Blocks(title="AutoShorts (local)") as app:
-        gr.Markdown("# AutoShorts — Turn videos into shorts locally")
+    with gr.Blocks(title="MarkSoft AutoShorts") as app:
+        gr.Markdown("# MarkSoft AutoShorts — Turn videos into shorts locally")
         gr.Markdown(
-            "Like **Klap** and **Opus Clip**: paste a link, choose a layout, generate. "
+            "Paste a link or upload a video, choose a layout, generate. "
             "We auto-detect the best moments, add captions, and reframe for vertical (9:16). "
             "All processing runs on your machine."
         )
@@ -392,7 +401,7 @@ def build_ui() -> gr.Blocks:
         gr.Markdown("### 1. How many shorts?")
         num_clips = gr.Slider(1, 10, value=3, step=1, label="Number of shorts")
 
-        gr.Markdown("### 2. Layout (like Opus Clip)")
+        gr.Markdown("### 2. Layout")
         gr.Markdown(
             "**Screen recording of a feed or event/news clip?** → Choose **Event / news**. "
             "**Actual stream with webcam + chat on screen?** → **Streaming**. "
@@ -460,26 +469,33 @@ def build_ui() -> gr.Blocks:
                 delete_preset_btn = gr.Button("Delete selected")
             preset_status = gr.Textbox(label="Preset status", interactive=False, visible=True)
 
-            gr.Markdown("Enter **percent** of frame (0–100). Webcam = first box, Chat = second box. Left/Right = horizontal, Top/Bottom = vertical.")
+            gr.Markdown(
+                "Same idea for all three: **Left / Top / Right / Bottom %** define a rectangle on the full video (0–100). "
+                "**Webcam** = top of the short, **Chat** = bottom, **Middle** = the strip in between (gap fill)."
+            )
             with gr.Row():
                 with gr.Column():
-                    gr.Markdown("**Webcam**")
+                    gr.Markdown("**Webcam** (top of short)")
                     w_left = gr.Number(value=0, label="Left %", minimum=0, maximum=100)
                     w_top = gr.Number(value=40, label="Top %", minimum=0, maximum=100)
                     w_right = gr.Number(value=50, label="Right %", minimum=0, maximum=100)
                     w_bottom = gr.Number(value=100, label="Bottom %", minimum=0, maximum=100)
                 with gr.Column():
-                    gr.Markdown("**Chat**")
+                    gr.Markdown("**Chat** (bottom of short)")
                     c_left = gr.Number(value=50, label="Left %", minimum=0, maximum=100)
                     c_top = gr.Number(value=40, label="Top %", minimum=0, maximum=100)
                     c_right = gr.Number(value=100, label="Right %", minimum=0, maximum=100)
                     c_bottom = gr.Number(value=100, label="Bottom %", minimum=0, maximum=100)
-            gr.Markdown("**Gap fill** — The strip between webcam and chat is filled with this region of the video (default: center 25%–75%).")
-            with gr.Row():
-                m_left = gr.Number(value=25, label="Center Left %", minimum=0, maximum=100)
-                m_top = gr.Number(value=25, label="Center Top %", minimum=0, maximum=100)
-                m_right = gr.Number(value=75, label="Center Right %", minimum=0, maximum=100)
-                m_bottom = gr.Number(value=75, label="Center Bottom %", minimum=0, maximum=100)
+                with gr.Column():
+                    gr.Markdown("**Middle** (gap between webcam & chat)")
+                    m_left = gr.Number(value=25, label="Left %", minimum=0, maximum=100)
+                    m_top = gr.Number(value=25, label="Top %", minimum=0, maximum=100)
+                    m_right = gr.Number(value=75, label="Right %", minimum=0, maximum=100)
+                    m_bottom = gr.Number(value=75, label="Bottom %", minimum=0, maximum=100)
+            gr.Markdown(
+                "**Tip:** Middle uses the same 4 numbers as webcam/chat. Default 25–75 is the center of the frame. "
+                "If the middle looks wrong (e.g. head cropped), try **lower Top %** to capture higher, or **higher Bottom %** to capture lower."
+            )
             with gr.Row():
                 preview_btn = gr.Button("Preview regions on a frame")
                 preview_final_btn = gr.Button("Preview final layout (9:16)")
@@ -490,17 +506,23 @@ def build_ui() -> gr.Blocks:
 
         crop_mode.change(show_manual_section, crop_mode, manual_accord)
 
-        def do_preview(inp_mode, url, vid, wl, wt, wr, wb, cl, ct, cr, cb):
+        def do_preview(inp_mode, url, vid, wl, wt, wr, wb, cl, ct, cr, cb, ml, mt, mr, mb):
             img = preview_manual_regions(
                 "", inp_mode, url, vid,
                 wl or 0, wt or 40, wr or 50, wb or 100,
                 cl or 50, ct or 40, cr or 100, cb or 100,
+                ml or 25, mt or 25, mr or 75, mb or 75,
             )
             return img if img is not None else None
 
         preview_btn.click(
             fn=do_preview,
-            inputs=[input_mode, url_in, file_in, w_left, w_top, w_right, w_bottom, c_left, c_top, c_right, c_bottom],
+            inputs=[
+                input_mode, url_in, file_in,
+                w_left, w_top, w_right, w_bottom,
+                c_left, c_top, c_right, c_bottom,
+                m_left, m_top, m_right, m_bottom,
+            ],
             outputs=preview_out,
         )
 

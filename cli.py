@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CLI for AutoShorts: turn long videos into viral shorts locally."""
+"""CLI for MarkSoft AutoShorts: turn long videos into shorts locally."""
 from __future__ import annotations
 
 import argparse

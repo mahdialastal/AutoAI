@@ -1,1 +1,1 @@
-# AutoShorts - local Klap-like pipeline
+# MarkSoft AutoShorts - local pipeline
