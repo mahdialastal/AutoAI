@@ -1,0 +1,14 @@
+# Core pipeline
+faster-whisper>=1.0.0
+yt-dlp>=2024.1.0
+ollama>=0.3.0
+ffmpeg-python>=0.2.0
+mediapipe>=0.10.14
+opencv-python-headless>=4.9.0
+
+# Optional: web UI
+gradio>=4.0.0
+
+# Utils
+python-dotenv>=1.0.0
+Pillow>=9.0.0
