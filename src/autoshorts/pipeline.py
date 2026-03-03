@@ -21,6 +21,7 @@ def run_pipeline(
     chunk_duration: float = 30.0,
     min_duration: float = 15.0,
     max_duration: float = 60.0,
+    clip_end_padding_sec: float = 5.0,
     burn_captions: bool = True,
     smart_crop: bool = True,
     crop_mode: str = "bottom_split_stack",
@@ -61,6 +62,10 @@ def run_pipeline(
         min_duration=min_duration,
         max_duration=max_duration,
     )
+    # Slightly extend end of each clip so punch lines aren't cut off at chunk boundary
+    video_duration_sec = max(s["end"] for s in segments) if segments else 0.0
+    for chunk in selected:
+        chunk["end"] = min(chunk["end"] + clip_end_padding_sec, video_duration_sec)
 
     # Resolve "auto" layout from first frame
     if crop_mode == "auto" and selected:

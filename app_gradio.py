@@ -85,6 +85,112 @@ def delete_crop_preset(name):
         return str(e)
 
 
+GENERATED_DIR = APP_ROOT / "generated"
+
+
+def _source_label(source: str) -> str:
+    """Short display label for a source (URL or path)."""
+    if not source:
+        return "Unknown"
+    s = source.strip()
+    if s.startswith(("http://", "https://")):
+        # YouTube: show video id or domain
+        if "youtube.com" in s or "youtu.be" in s:
+            for sep in ("v=", "youtu.be/"):
+                if sep in s:
+                    rest = s.split(sep, 1)[-1].split("&")[0].split("?")[0].strip("/")
+                    if rest:
+                        return f"YouTube: {rest[:20]}" + ("…" if len(rest) > 20 else "")
+        return "URL: " + s[:30] + ("…" if len(s) > 30 else "")
+    # Local file
+    return os.path.basename(s) or s[:30]
+
+
+def list_generated_runs():
+    """Return list of (folder_name, display_label) for History dropdown, newest first."""
+    if not GENERATED_DIR.exists():
+        return []
+    runs = []
+    for d in GENERATED_DIR.iterdir():
+        if d.is_dir() and not d.name.startswith("."):
+            label = d.name.replace("_", " ", 1)
+            runs.append((d.name, label))
+    runs.sort(key=lambda x: x[0], reverse=True)
+    return runs
+
+
+def get_runs_by_source():
+    """
+    Group runs by source video. Returns list of (source_key, source_label, runs)
+    where runs = [(folder_name, run_timestamp_label), ...] newest first per source.
+    """
+    if not GENERATED_DIR.exists():
+        return []
+    # folder_name -> (run_timestamp_label, source_key, source_label)
+    run_info = {}
+    for d in GENERATED_DIR.iterdir():
+        if not d.is_dir() or d.name.startswith("."):
+            continue
+        folder_name = d.name
+        ts_label = folder_name.replace("_", " ", 1)
+        meta_path = d / "run_metadata.json"
+        if meta_path.exists():
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                src = meta.get("source", "")
+                src_label = meta.get("source_label") or _source_label(src)
+                # Use normalized source as key (same video = same key)
+                source_key = src.strip() or f"__unknown_{folder_name}"
+                run_info[folder_name] = (ts_label, source_key, src_label)
+            except Exception:
+                run_info[folder_name] = (ts_label, f"__unknown_{folder_name}", "Unknown")
+        else:
+            run_info[folder_name] = (ts_label, f"__unknown_{folder_name}", "Unknown")
+    # Group by source_key
+    by_source = {}
+    for folder_name, (ts_label, source_key, source_label) in run_info.items():
+        if source_key not in by_source:
+            by_source[source_key] = (source_label, [])
+        by_source[source_key][1].append((folder_name, ts_label))
+    for lst in by_source.values():
+        lst[1].sort(key=lambda x: x[0], reverse=True)
+    # Sort sources by most recent run
+    order = sorted(by_source.items(), key=lambda x: x[1][1][0][0] if x[1][1] else "", reverse=True)
+    return [(sk, sl, runs) for sk, (sl, runs) in order]
+
+
+def get_run_shorts(folder_name):
+    """
+    Return (list of (title, path_str), list of path_str for gallery) for a run folder.
+    Reads run_metadata.json for titles if present; else uses "Short 1", "Short 2" from filenames.
+    """
+    if not folder_name:
+        return [], []
+    run_dir = GENERATED_DIR / folder_name
+    if not run_dir.exists() or not run_dir.is_dir():
+        return [], []
+    # Load metadata for titles and timestamp
+    meta_path = run_dir / "run_metadata.json"
+    titles = {}
+    run_timestamp = folder_name.replace("_", " ", 1)
+    if meta_path.exists():
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            run_timestamp = meta.get("run_timestamp", run_timestamp)
+            for s in meta.get("shorts", []):
+                titles[s["file"]] = s.get("title", s["file"])
+        except Exception:
+            pass
+    # List short_*.mp4
+    shorts = []
+    for f in sorted(run_dir.glob("short_*.mp4")):
+        title = titles.get(f.name, f"Short {f.stem.split('_')[-1]}")
+        path_str = str(f.resolve())
+        shorts.append((title, run_timestamp, path_str))
+    paths_only = [p for _, _, p in shorts]
+    return shorts, paths_only
+
+
 def preview_manual_regions(
     source: str,
     input_mode: str,
@@ -258,10 +364,10 @@ def generate(
 ) -> tuple[str, list[str]]:
     """Returns (status_message, list of video paths for gallery)."""
     if not source or not source.strip():
-        return "Enter a YouTube URL or provide a video file path.", []
+        return "Enter a YouTube URL or provide a video file path.", [], None
     source = source.strip()
     if not source.startswith(("http://", "https://")) and not os.path.isfile(source):
-        return "Not a valid URL or existing file path.", []
+        return "Not a valid URL or existing file path.", [], None
     try:
         download_dir = APP_ROOT / "downloads"
         download_dir.mkdir(parents=True, exist_ok=True)
@@ -287,14 +393,24 @@ def generate(
             manual_center_bbox=manual_center_bbox,
         )
         if not paths:
-            return "No segments found (empty or very short transcript).", []
+            return "No segments found (empty or very short transcript).", [], None
         path_strs = [str(p.resolve()) for p in paths]
+        # Save run metadata (titles + timestamp) for History
+        run_ts = run_folder.replace("_", " ", 1)  # "2026-03-03 23-15-42"
+        meta = {
+            "run_timestamp": run_ts,
+            "source": source,
+            "source_label": _source_label(source),
+            "shorts": [{"file": p.name, "title": f"Short {i+1}"} for i, p in enumerate(paths)],
+        }
+        (output_dir / "run_metadata.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
         return (
             f"Generated {len(paths)} short(s) in generated/{run_folder}/.",
             path_strs,
+            run_folder,
         )
     except Exception as e:
-        return f"Error: {e}", []
+        return f"Error: {e}", [], None
 
 
 def run_ui(
@@ -330,7 +446,7 @@ def run_ui(
         else:
             source = str(video_path)
     if not source:
-        return "Paste a URL or upload a video, then click Generate.", []
+        return "Paste a URL or upload a video, then click Generate.", [], None
     manual_webcam = None
     manual_chat = None
     manual_center = None
@@ -356,9 +472,9 @@ def run_ui(
                 else:
                     manual_center = (0.25, 0.25, 0.75, 0.75)
             else:
-                return "Manual regions: left must be < right, top < bottom for both boxes.", []
+                return "Manual regions: left must be < right, top < bottom for both boxes.", [], None
         except (TypeError, ValueError):
-            return "Manual regions: enter numbers 0–100 for all 8 fields.", []
+            return "Manual regions: enter numbers 0–100 for all 8 fields.", [], None
     else:
         manual_center = None
     return generate(
@@ -613,16 +729,132 @@ def build_ui() -> gr.Blocks:
 
         gr.Markdown("---")
         gr.Markdown("### Generated shorts")
-        gallery = gr.Gallery(
-            label="Generated shorts",
-            columns=1,
-            object_fit="contain",
-            height="auto",
+        with gr.Tabs():
+            with gr.TabItem("This run"):
+                gallery = gr.Gallery(
+                    label="Generated shorts",
+                    columns=1,
+                    object_fit="contain",
+                    height="auto",
+                )
+            with gr.TabItem("History"):
+                gr.Markdown("Browse by **source video**, then pick a run to see and play the shorts.")
+                by_source = get_runs_by_source()
+                # Dropdown 1: From video (source)
+                video_choices = [
+                    (f"{sl} ({len(runs)} run{'s' if len(runs) != 1 else ''})", sk)
+                    for sk, sl, runs in by_source
+                ]
+                first_source_key = video_choices[0][1] if video_choices else None
+                first_run_folder = None
+                if by_source:
+                    first_run_folder = by_source[0][2][0][0]  # first folder_name of first source
+                history_video_dropdown = gr.Dropdown(
+                    choices=video_choices,
+                    value=first_source_key,
+                    label="From video",
+                    allow_custom_value=False,
+                )
+                # Dropdown 2: Run (timestamp) for selected video
+                run_choices_for_first = [(ts, fn) for fn, ts in (by_source[0][2] if by_source else [])]
+                history_run_dropdown = gr.Dropdown(
+                    choices=run_choices_for_first,
+                    value=first_run_folder,
+                    label="Run",
+                    allow_custom_value=False,
+                )
+                if first_run_folder:
+                    shorts, _initial_paths = get_run_shorts(first_run_folder)
+                    if shorts:
+                        _lines = ["| Title | Generated |", "|-------|-----------|"]
+                        for _t, _ts, _ in shorts:
+                            _lines.append(f"| **{_t}** | {_ts} |")
+                        _initial_md = "\n".join(_lines)
+                    else:
+                        _initial_md, _initial_paths = "No shorts in this run.", []
+                else:
+                    _initial_md, _initial_paths = "Select a video and run above.", []
+                history_list_md = gr.Markdown(
+                    value=_initial_md,
+                    label="Shorts in this run",
+                )
+                history_gallery = gr.Gallery(
+                    label="Play shorts",
+                    columns=1,
+                    object_fit="contain",
+                    height="auto",
+                    value=_initial_paths,
+                )
+
+        def on_history_video_select(source_key):
+            if not source_key:
+                return gr.update(choices=[], value=None), "Select a video above.", []
+            by_source = get_runs_by_source()
+            runs = []
+            for sk, _, run_list in by_source:
+                if sk == source_key:
+                    runs = [(ts, fn) for fn, ts in run_list]
+                    break
+            if not runs:
+                return gr.update(choices=[], value=None), "No runs for this video.", []
+            first_folder = runs[0][1]
+            md, paths = on_history_select(first_folder)
+            return gr.update(choices=runs, value=first_folder), md, paths
+
+        def on_history_select(folder_name):
+            if not folder_name:
+                return "Select a run above.", []
+            shorts, paths = get_run_shorts(folder_name)
+            if not shorts:
+                return "No shorts in this run.", []
+            lines = ["| Title | Generated |", "|-------|-----------|"]
+            for title, ts, _ in shorts:
+                lines.append(f"| **{title}** | {ts} |")
+            return "\n".join(lines), paths
+
+        history_video_dropdown.change(
+            on_history_video_select,
+            inputs=[history_video_dropdown],
+            outputs=[history_run_dropdown, history_list_md, history_gallery],
+        )
+        history_run_dropdown.change(
+            on_history_select,
+            inputs=[history_run_dropdown],
+            outputs=[history_list_md, history_gallery],
         )
 
         def on_generate(url, vid, n, mode, crop, focus, letterbox, use_man, wl, wt, wr, wb, cl, ct, cr, cb, ml, mt, mr, mb):
-            msg, paths = run_ui(url, vid, n, mode, crop, focus, letterbox, use_man, wl or 0, wt or 40, wr or 50, wb or 100, cl or 50, ct or 40, cr or 100, cb or 100, ml or 25, mt or 25, mr or 75, mb or 75)
-            return msg, paths
+            msg, paths, run_folder = run_ui(url, vid, n, mode, crop, focus, letterbox, use_man, wl or 0, wt or 40, wr or 50, wb or 100, cl or 50, ct or 40, cr or 100, cb or 100, ml or 25, mt or 25, mr or 75, mb or 75)
+            if run_folder is not None:
+                by_source = get_runs_by_source()
+                video_choices = [
+                    (f"{sl} ({len(runs)} run{'s' if len(runs) != 1 else ''})", sk)
+                    for sk, sl, runs in by_source
+                ]
+                # Find source_key for this run (from metadata we just wrote)
+                run_meta_path = GENERATED_DIR / run_folder / "run_metadata.json"
+                source_key = f"__unknown_{run_folder}"
+                if run_meta_path.exists():
+                    try:
+                        meta = json.loads(run_meta_path.read_text(encoding="utf-8"))
+                        source_key = (meta.get("source") or "").strip() or source_key
+                    except Exception:
+                        pass
+                run_choices = []
+                for sk, _, run_list in by_source:
+                    if sk == source_key:
+                        run_choices = [(ts, fn) for fn, ts in run_list]
+                        break
+                md, history_paths = on_history_select(run_folder)
+                return (
+                    msg,
+                    paths,
+                    gr.update(choices=video_choices, value=source_key),
+                    gr.update(choices=run_choices, value=run_folder),
+                    md,
+                    history_paths,
+                )
+            return msg, paths, gr.update(), gr.update(), "Select a video and run above.", []
 
         run_btn.click(
             fn=on_generate,
@@ -648,7 +880,7 @@ def build_ui() -> gr.Blocks:
                 m_right,
                 m_bottom,
             ],
-            outputs=[msg_out, gallery],
+            outputs=[msg_out, gallery, history_video_dropdown, history_run_dropdown, history_list_md, history_gallery],
         )
     return app
 

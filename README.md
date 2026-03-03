@@ -16,6 +16,39 @@ Turn long videos or YouTube links into short clips (Shorts / Reels / TikTok) usi
 
 ---
 
+## How clip selection works (workflow)
+
+The app uses **transcript + AI** to decide what to clip. Clips are aligned to **fixed-length chunks**, so punch lines near a chunk boundary can sometimes be cut. Here’s the full flow and how we reduce that.
+
+**1. Transcribe the video**  
+[faster-whisper](https://github.com/SYSTRAN/faster-whisper) turns speech into **segments**: short phrases with start/end times (e.g. “So then he said…” from 12.3s to 14.1s). No AI yet — just speech-to-text.
+
+**2. Build chunks**  
+Segments are grouped into **chunks** of roughly **30 seconds** (configurable via `--chunk-duration`). Each chunk has one start time, one end time, and the combined text. Boundaries are **time-based**, not “per sentence,” so a punch line that crosses 30s might sit on a chunk edge.
+
+**3. AI picks the best chunks**  
+Your local LLM ([Ollama](https://ollama.ai), e.g. Mistral) sees the list of chunks (timestamps + first 200 characters of text) and is asked: *“Which N chunks would make the best viral shorts?”* It prefers strong hooks, clear ideas, and punchy moments. It returns **chunk indices** (e.g. [2, 5, 7]). Those chunks become your N shorts.
+
+**4. Clip boundaries and punch-line safeguard**  
+Each short is cut at the chunk’s **start** and **end**. To avoid cutting off the very end of a line (e.g. the punch line), the pipeline **adds a few seconds** after each chunk end (default **5 seconds**), capped at the video length. So a chunk that originally ended at 30s is exported as 30s–35s (or to the end of the video). You can tune this later via a CLI/UI option if needed.
+
+**5. Export**  
+For each selected chunk (with the padded end), the app cuts the video, applies your layout (crop/reframe), burns captions, and saves a 9:16 MP4.
+
+**Summary**
+
+| Step | What happens |
+|------|----------------------|
+| 1. Transcribe | Whisper → segments (phrase-level start/end + text) |
+| 2. Chunk | Group segments into ~30s chunks (time-based boundaries) |
+| 3. Select | Ollama picks N “best for shorts” chunks from the transcript |
+| 4. Pad ends | Add a few seconds after each chunk end (punch-line safeguard) |
+| 5. Export | Cut video, crop to layout, burn captions → short |
+
+So: **yes, the AI uses a transcript and analyzes it** — it doesn’t watch the video, only the chunked text and timestamps. If a clip still cuts off a punch line, the line may be right at the end of the padded window; increasing chunk duration or adding a “clip end padding” option later can help.
+
+---
+
 ## Prerequisites (install once)
 
 | Tool | Install |
@@ -163,6 +196,7 @@ See **[docs/TOOLS_AND_SETUP.md](docs/TOOLS_AND_SETUP.md)** for tools (FFmpeg, Wh
 - **Ollama errors** — Ensure Ollama is running and you’ve run `ollama pull mistral` (or the model you use).
 - **Cropping wrong for streaming** — Use **Set crop regions yourself**, enter Left/Top/Right/Bottom % for webcam and chat, enable **Use my crop regions**, then **Preview regions on a frame** to confirm before generating.
 - **Middle part looks off** — Adjust the **Middle** column (Left/Top/Right/Bottom %). Lower **Top %** to include more above the subject; use **Preview final layout (9:16)** to check.
+- **Punch line or end of clip is cut off** — Clips are based on fixed-length chunks (see [How clip selection works](#how-clip-selection-works-workflow)). We add 5 seconds after each chunk end to reduce this. If it still happens, the line may be beyond that; try a larger Whisper model or a longer `--chunk-duration` (CLI) so chunks align better with sentences.
 
 ---
 
