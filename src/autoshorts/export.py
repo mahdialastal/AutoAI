@@ -5,6 +5,32 @@ import subprocess
 from pathlib import Path
 
 
+def _get_video_dimensions(video_path: Path) -> tuple[int, int] | None:
+    """Return (width, height) via ffprobe, or None."""
+    try:
+        out = subprocess.run(
+            [
+                "ffprobe",
+                "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=width,height",
+                "-of", "csv=p=0",
+                str(video_path.resolve()),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if out.returncode != 0 or not out.stdout.strip():
+            return None
+        parts = out.stdout.strip().split(",")
+        if len(parts) >= 2:
+            return int(parts[0]), int(parts[1])
+    except Exception:
+        pass
+    return None
+
+
 def make_short(
     video_path: Path,
     start_sec: float,
@@ -22,14 +48,13 @@ def make_short(
     manual_right: float | None = None,
     webcam_bbox: tuple[float, float, float, float] | None = None,
     chat_bbox: tuple[float, float, float, float] | None = None,
+    center_bbox: tuple[float, float, float, float] | None = None,
+    event_bbox: tuple[float, float, float, float] | None = None,
+    letterbox_full_width: bool = False,
 ) -> Path:
     """
     Extract [start_sec, end_sec], crop to height x width (9:16), optionally burn SRT.
-    crop_mode: "center" = center crop (or follow focus_x);
-      "bottom_strip_rotate" = bottom strip rotated 90° CW (left→top, right→bottom);
-      "bottom_split_stack" = bottom-left quadrant on top, bottom-right on bottom, stacked (no rotation).
-      "bottom_split_stack_swapped" = bottom-right on top, bottom-left on bottom.
-      "webcam_chat_stack" = webcam (face) region on top, chat (right strip) on bottom; requires webcam_bbox and chat_bbox.
+    letterbox_full_width: if True, scale to full width 1080 and pad top/bottom to 1920 (no horizontal crop).
     """
     duration = end_sec - start_sec
     output_path = Path(output_path)
@@ -37,11 +62,10 @@ def make_short(
 
     # Optional pre-crop used for screen recordings where a vertical short
     # is centered on the screen (e.g. X / TikTok / YouTube Shorts in a browser).
-    # We keep a tall, narrow region around the center to throw away browser chrome
-    # and side gutters before applying the main 9:16 crop.
+    # We keep a wide center region so embedded video players are included.
     if focus_region == "center":
-        # 50% of width, 90% of height, centered.
-        center_crop = "crop=in_w*0.5:in_h*0.9:in_w*0.25:in_h*0.05"
+        # 70% width, 90% height, centered (for screen recordings with video in the middle)
+        center_crop = "crop=in_w*0.7:in_h*0.9:in_w*0.15:in_h*0.05"
     else:
         center_crop = None
 
@@ -86,21 +110,58 @@ def make_short(
         vf_parts = None
     elif crop_mode == "webcam_chat_stack":
         vf_parts = None  # uses filter_complex with webcam_bbox and chat_bbox; if missing, fallback in branch below
+    elif crop_mode == "event":
+        # Final step: fill 1080x1920 (crop) or full-width letterbox (no horizontal crop)
+        if letterbox_full_width:
+            scale_final = "scale=1080:-1,pad=1080:1920:0:(1920-ih)/2:black"
+        else:
+            scale_final = f"scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height}"
+        if event_bbox is not None:
+            xmin, ymin, xmax, ymax = event_bbox
+            rw = max(0.02, xmax - xmin)
+            rh = max(0.02, ymax - ymin)
+            event_crop = f"crop=in_w*{rw:.4f}:in_h*{rh:.4f}:in_w*{xmin:.4f}:in_h*{ymin:.4f}"
+            if focus_region == "center":
+                center_crop_str = "crop=in_w*0.7:in_h*0.9:in_w*0.15:in_h*0.05"
+                vf_parts = [center_crop_str, event_crop, scale_final]
+            else:
+                vf_parts = [event_crop, scale_final]
+        else:
+            vf_parts = [center_crop, scale_final] if center_crop else [scale_final]
     else:
-        # Scale to target height while preserving aspect, then crop to 9:16.
-        scale = f"scale=-1:{height}:force_original_aspect_ratio=increase"
-        if focus_x is None:
-            crop = f"crop={width}:{height}:(in_w-{width})/2:(in_h-{height})/2"
+        # center / speaker / event fallback
+        if letterbox_full_width:
+            scale_final = "scale=1080:-1,pad=1080:1920:0:(1920-ih)/2:black"
+        else:
+            scale_final = f"scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height}"
+        if event_bbox is not None:
+            xmin, ymin, xmax, ymax = event_bbox
+            rw = xmax - xmin
+            rh = ymax - ymin
+            if rw < 0.02:
+                rw = 0.02
+            if rh < 0.02:
+                rh = 0.02
+            event_crop = f"crop=in_w*{rw:.4f}:in_h*{rh:.4f}:in_w*{xmin:.4f}:in_h*{ymin:.4f}"
+            vf_parts = [event_crop, scale_final]
+        elif focus_x is None:
+            vf_parts = []
+            if manual_crop:
+                vf_parts.append(manual_crop)
+            elif center_crop:
+                vf_parts.append(center_crop)
+            vf_parts.append(scale_final)
         else:
             cx_expr = f"in_w*{focus_x:.3f}"
             x_expr = f"min(max({cx_expr}-{width/2}, 0), in_w-{width})"
             crop = f"crop={width}:{height}:{x_expr}:(in_h-{height})/2"
-        vf_parts = []
-        if manual_crop:
-            vf_parts.append(manual_crop)
-        elif center_crop:
-            vf_parts.append(center_crop)
-        vf_parts.extend([scale, crop])
+            vf_parts = []
+            if manual_crop:
+                vf_parts.append(manual_crop)
+            elif center_crop:
+                vf_parts.append(center_crop)
+            vf_parts.append(f"scale=-1:{height}:force_original_aspect_ratio=increase")
+            vf_parts.append(crop)
     if srt_path and srt_path.exists():
         srt_name = srt_path.name
         if vf_parts is not None:
@@ -111,13 +172,57 @@ def make_short(
     if crop_mode == "webcam_chat_stack" and webcam_bbox is not None and chat_bbox is not None:
         wl, wt, wr, wb = webcam_bbox
         cl, ct, cr, cb = chat_bbox
-        fc = (
-            f"[0:v]crop=in_w*{wr-wl:.4f}:in_h*{wb-wt:.4f}:in_w*{wl:.4f}:in_h*{wt:.4f}[wc];"
-            "[wc]scale=1080:960:force_original_aspect_ratio=increase,crop=1080:960[wc2];"
-            f"[0:v]crop=in_w*{cr-cl:.4f}:in_h*{cb-ct:.4f}:in_w*{cl:.4f}:in_h*{ct:.4f}[ch];"
-            "[ch]scale=1080:960:force_original_aspect_ratio=increase,crop=1080:960[ch2];"
-            "[wc2][ch2]vstack=inputs=2[out]"
-        )
+        rw_w = max(0.01, wr - wl)
+        rh_w = max(0.01, wb - wt)
+        rw_c = max(0.01, cr - cl)
+        rh_c = max(0.01, cb - ct)
+        # Heights when scaled to width 1080: need source dimensions so aspect is correct
+        src_wh = _get_video_dimensions(video_path)
+        if src_wh is not None:
+            W, H = src_wh
+            h_w = max(1, min(1920, round(1080 * (H * rh_w) / (W * rw_w))))
+            h_c = max(1, min(1920, round(1080 * (H * rh_c) / (W * rw_c))))
+        else:
+            h_w = max(1, min(1920, round(1080 * rh_w / rw_w)))
+            h_c = max(1, min(1920, round(1080 * rh_c / rw_c)))
+        # Force even heights for 4:2:0 and avoid pad "smaller than input" errors
+        def even(v: int) -> int:
+            return max(2, (v // 2) * 2)
+        h_w = even(h_w)
+        h_c = even(h_c)
+        # Center fill: default center 50% of frame; or use center_bbox
+        if center_bbox is not None:
+            ml, mt, mr, mb = center_bbox
+        else:
+            ml, mt, mr, mb = 0.25, 0.25, 0.75, 0.75
+        rw_m = max(0.01, mr - ml)
+        rh_m = max(0.01, mb - mt)
+
+        if h_w + h_c < 1920:
+            h_mid = even(1920 - h_w - h_c)
+            # Three-way stack: webcam (top) | center (middle) | chat (bottom)
+            # Use scale-to-fill then crop to exact size so pad is never asked to shrink (avoids FFmpeg error)
+            fc = (
+                f"[0:v]crop=in_w*{rw_w:.4f}:in_h*{rh_w:.4f}:in_w*{wl:.4f}:in_h*{wt:.4f}[wc];"
+                f"[wc]scale=1080:{h_w}:force_original_aspect_ratio=increase,crop=1080:{h_w}:0:0[wc2];"
+                f"[0:v]crop=in_w*{rw_c:.4f}:in_h*{rh_c:.4f}:in_w*{cl:.4f}:in_h*{ct:.4f}[ch];"
+                f"[ch]scale=1080:{h_c}:force_original_aspect_ratio=increase,crop=1080:{h_c}:0:0[ch2];"
+                f"[0:v]crop=in_w*{rw_m:.4f}:in_h*{rh_m:.4f}:in_w*{ml:.4f}:in_h*{mt:.4f}[mid];"
+                f"[mid]scale=1080:{h_mid}:force_original_aspect_ratio=decrease,pad=1080:{h_mid}:(ow-iw)/2:(oh-ih)/2:black[mid2];"
+                "[wc2][mid2][ch2]vstack=inputs=3[out]"
+            )
+        else:
+            # Scale webcam and chat to fit 1920 total height; no middle
+            scale = 1920 / (h_w + h_c)
+            h_w_new = even(max(1, round(h_w * scale)))
+            h_c_new = 1920 - h_w_new  # keep total exactly 1920
+            fc = (
+                f"[0:v]crop=in_w*{rw_w:.4f}:in_h*{rh_w:.4f}:in_w*{wl:.4f}:in_h*{wt:.4f}[wc];"
+                f"[wc]scale=1080:{h_w_new}:force_original_aspect_ratio=increase,crop=1080:{h_w_new}:0:0[wc2];"
+                f"[0:v]crop=in_w*{rw_c:.4f}:in_h*{rh_c:.4f}:in_w*{cl:.4f}:in_h*{ct:.4f}[ch];"
+                f"[ch]scale=1080:{h_c_new}:force_original_aspect_ratio=increase,crop=1080:{h_c_new}:0:0[ch2];"
+                "[wc2][ch2]vstack=inputs=2[out]"
+            )
         cmd = [
             "ffmpeg", "-y",
             "-ss", str(start_sec),
@@ -130,10 +235,8 @@ def make_short(
             str(output_path.resolve()),
         ]
     elif crop_mode == "webcam_chat_stack":
-        # Detection failed: fall back to center crop
-        scale = f"scale=-1:{height}:force_original_aspect_ratio=increase"
-        crop = f"crop={width}:{height}:(in_w-{width})/2:(in_h-{height})/2"
-        vf_fallback = ",".join([scale, crop])
+        scale_crop = f"scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height}"
+        vf_fallback = scale_crop
         cmd = [
             "ffmpeg", "-y",
             "-ss", str(start_sec),

@@ -82,10 +82,13 @@ def get_face_bbox(
     video_path: Path,
     at_sec: float = 2.0,
     padding: float = 0.15,
+    prefer_bottom_half: bool = False,
 ) -> Optional[tuple[float, float, float, float]]:
     """
     Get the bounding box of the largest face in a frame as (xmin, ymin, xmax, ymax) normalized in [0,1].
     padding: extra margin around the face (e.g. 0.15 = 15% on each side).
+    prefer_bottom_half: if True, only consider faces whose center is in the bottom half of the frame
+                        (so we pick the streamer's webcam, not a face in the main video).
     Returns None if no face detected.
     """
     cap = cv2.VideoCapture(str(video_path))
@@ -110,8 +113,17 @@ def get_face_bbox(
         result = face_detection.process(rgb)
         if not result.detections:
             return None
+        candidates = result.detections
+        if prefer_bottom_half:
+            # Prefer faces in the bottom half (e.g. streamer webcam), ignore main video face
+            bottom_half = [
+                d for d in candidates
+                if d.location_data.relative_bounding_box.ymin + d.location_data.relative_bounding_box.height / 2 >= 0.5
+            ]
+            if bottom_half:
+                candidates = bottom_half
         best = max(
-            result.detections,
+            candidates,
             key=lambda d: (d.score[0] if d.score else 0.0),
         )
         box = best.location_data.relative_bounding_box
@@ -155,14 +167,28 @@ def detect_webcam_chat_regions(
     at_sec: float = 2.0,
     chat_width_ratio: float = 0.35,
     expand_webcam: bool = True,
+    bottom_half_layout: bool = True,
 ) -> tuple[tuple[float, float, float, float], tuple[float, float, float, float]]:
     """
-    Detect webcam (face) and chat (right-side strip) regions for stacking.
+    Detect webcam (face) and chat regions for stacking.
     Returns (webcam_bbox, chat_bbox) each (left, top, right, bottom) in [0,1].
-    If no face is found, webcam_bbox is center 50% of frame.
-    Chat is always the right chat_width_ratio of the frame (e.g. 0.35 = right 35%).
-    When expand_webcam is True, the face bbox is expanded so the crop shows head+shoulders.
+
+    When bottom_half_layout is True (typical stream: main video top, webcam bottom-left, chat bottom-right):
+      - Prefer a face in the bottom half of the frame (streamer), not the main content.
+      - Chat = bottom-right quadrant (0.5, 0.5, 1, 1). If no face in bottom half, webcam fallback = (0, 0.4, 0.5, 1).
+    When False: webcam = face or center 50%; chat = right chat_width_ratio full height.
     """
+    if bottom_half_layout:
+        face = get_face_bbox(video_path, at_sec=at_sec, prefer_bottom_half=True)
+        if face is not None:
+            webcam_bbox = _expand_bbox_for_webcam(face) if expand_webcam else face
+        else:
+            # No face in bottom half: use bottom-left quadrant for webcam
+            webcam_bbox = (0.0, 0.4, 0.5, 1.0)
+        # Chat = bottom-right quadrant
+        chat_bbox = (0.5, 0.5, 1.0, 1.0)
+        return webcam_bbox, chat_bbox
+
     face = get_face_bbox(video_path, at_sec=at_sec)
     if face is not None:
         webcam_bbox = _expand_bbox_for_webcam(face) if expand_webcam else face
@@ -175,4 +201,24 @@ def detect_webcam_chat_regions(
     chat_bbox = (chat_left, 0.0, 1.0, 1.0)
 
     return webcam_bbox, chat_bbox
+
+
+def suggest_layout(
+    video_path: Path,
+    at_sec: float = 2.0,
+) -> str:
+    """
+    Suggest layout from one frame: if one face in left half → streaming (webcam+chat);
+    otherwise → speaker only (center).
+    Returns "webcam_chat_stack" or "center".
+    """
+    face = get_face_bbox(video_path, at_sec=at_sec, padding=0.1)
+    if face is None:
+        return "center"
+    xmin, _, xmax, _ = face
+    cx = (xmin + xmax) / 2.0
+    # Face in left half of frame → typical streaming layout (webcam left, content/chat right)
+    if cx < 0.5:
+        return "webcam_chat_stack"
+    return "center"
 

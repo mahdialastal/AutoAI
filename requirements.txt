@@ -5,6 +5,8 @@ ollama>=0.3.0
 ffmpeg-python>=0.2.0
 mediapipe>=0.10.14
 opencv-python-headless>=4.9.0
+ultralytics>=8.0.0
+lap>=0.5.12
 
 # Optional: web UI
 gradio>=4.0.0

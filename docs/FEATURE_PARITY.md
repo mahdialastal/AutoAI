@@ -13,9 +13,35 @@ This document maps what commercial “long video → shorts” apps do and how A
 | **Vidyo** | Paste URL or upload → AI generates clips → edit (trim, captions, templates). | **CutMagic** auto‑crops and keeps speaker in focus. Aspect ratio + template first; manual resize/crop available. |
 | **Dumme** | 1) Upload 2) AI finds highlights 3) Get shorts (captions, titles, descriptions). | Fully **automatic**; no layout selection. |
 | **2short** | Upload → AI creates shorts. | **Face tracking** keeps speaker centered automatically; no drawing or sliders. |
-| **AutoShorts (this app)** | Paste URL or upload → choose **Layout** (Streaming / Split / Speaker only) + Source (full / screen recording) → Generate. | **Streaming** = AI detects face + chat region, stacks webcam on top and chat on bottom (like Opus Gameplay). **Split** = bottom left/right stacked. **Speaker only** = face‑tracked center crop. No sliders; manual crop via CLI only. |
+| **AutoShorts (this app)** | Paste URL or upload → **Layout** (Auto / Streaming / Split / Speaker) + Source (full / screen recording) → Generate. | **Auto** = detect streaming vs speaker from first frame. **Streaming** = face + chat, webcam on top, chat on bottom. **Split** = bottom left/right stacked. **Speaker only** = face‑tracked center. **Source**: Screen recording = crop to center 70% first (for browser/embed). No sliders; manual crop via CLI only. |
 
 Takeaway: **No app uses sliders or “draw a box” in the main flow.** They use either full auto (Klap, Dumme, 2short) or **named layout presets** (Opus, Vidyo). AutoShorts matches that: one Layout dropdown with presets, Generate, done.
+
+---
+
+## Per-app workflow (all 18 checked)
+
+| App | Input | Main steps | Layout / reframe | Output |
+|-----|--------|------------|------------------|--------|
+| **Klap** | Upload or URL (YouTube, S3, etc.) | Upload → Convert with AI → Export | Auto reframe; AI keeps subject in frame. No layout pick in main flow. | Shorts, captions, vertical; share/schedule |
+| **2short AI** | Paste YouTube URL or upload | Paste link → AI analyzes → clips | Face tracking keeps speaker centered. Weak on screen recordings (41% accuracy). | 1080p Shorts/Reels/TikTok, animated subs |
+| **Dumme** | Upload or YouTube/Spotify/Twitter | Upload → AI finds highlights → Get shorts | Fully automatic; no layout choice. | Shorts with captions, titles, descriptions |
+| **Munch** | Long-form video | Upload → AI finds viral moments | Algorithm-optimized metadata; clip selection. | Trend-aware clips, explanations |
+| **Opus Clip** | URL (YouTube, Drive, Vimeo, Zoom, Twitch…) | Paste URL → AI generates clips | **Layout by name**: Gameplay, Screenshare (auto-detects), Split, Fill, Fit, Three, Four. Manual reframe = Crop / double-click. | Platform-ready 9:16 / 16:9 / 1:1 |
+| **Qlip** | Podcasts, long video, streams | Upload → AI spots highlights | Vertical/square, subtitles, speaker ID, branding. | Social-ready clips, publish |
+| **Spikes Studio** | Video (Twitch, YouTube, TikTok…) | Upload → AI clipping | Best moments → Shorts/Reels/Twitch; integrations. | Multiple clips, auto-captions, hashtags |
+| **Vidyo** | Paste URL or upload | Import → AI generates clips → edit | **CutMagic** auto scene detection; speaker in focus; aspect ratio + template. | Trim, captions, resize; schedule |
+| **Vizard AI** | Long-form video | Upload → AI editing | Auto subtitles, translation (100+ langs), speaker tracking, brand templates. | Shorts, text-based editing |
+| **Ssemble** | Video (part of broader editor) | In editor: clip generation | Repurposing and clip generation. | Clips within editor workflow |
+| **Veed.io** | Upload (browser) | Upload → edit | Auto subtitles, trim, zoom, b-roll, transitions. Caption-focused. | Edited video, captions |
+| **Submagic** | Video (API or app) | Upload → Magic Clips / auto-zoom | Viral captions 48+ langs, AI avatars, auto-zoom, auto-cuts, b-roll. | 4K/60fps, captions |
+| **Zubtitle** | Upload | Upload → transcribe → resize | Auto transcribe, caption styles, headlines, progress bars, resize for social. | Captioned, resized video |
+| **Wisecut** | Video | Upload → AI edit | **Facial recognition auto reframe**; multi-face focus; silence cut; storyboard/edit-by-transcript. | Auto captions, translations, music |
+| **LiveLink** | YouTube URL | Paste URL → Create Clips | AI finds moments, trim silence, resize, auto captions, hashtags. | Shorts, transcript |
+| **SendShort** | Video | Upload → AI moments | AI detection, auto subtitles, faceless/series, manual edit. | Clips, free tier |
+| **Short.ai** | URL or upload | Paste URL / upload → AI | Smart AI cropping (9:16, 1:1), virality score, B-roll, brand kit, scheduler. | 10+ clips, multi-platform |
+| **Nexus Clips** | YouTube, Twitch | Connect → clip | "Clip this" voice command, auto titles/descriptions/hashtags, text/stickers. | Unlimited clips |
+| **AutoShorts** | YouTube URL or upload | Paste URL / upload → set number of shorts → (optional: Layout, Source) → Generate | **Auto** = detect streaming vs speaker from first frame. **Streaming** = webcam top, chat bottom. **Split** / **Speaker only**. **Source**: full frame or screen recording (crop to center 70%). | 9:16 shorts, captions, local only |
 
 ---
 
