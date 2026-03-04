@@ -793,12 +793,12 @@ def build_ui() -> gr.Blocks:
                     value=_initial_paths,
                 )
 
-                # YouTube upload controls
-                upload_short_dropdown = gr.Dropdown(
+                # YouTube upload: use Radio so value is always the index (int), avoids Dropdown serialization issues
+                _upload_choices = [(s[0], i) for i, s in enumerate(shorts)] if first_run_folder and shorts else []
+                upload_short_dropdown = gr.Radio(
                     label="Short to upload",
-                    choices=[(s[0], i) for i, s in enumerate(shorts)] if first_run_folder and shorts else [],
+                    choices=_upload_choices,
                     value=0 if first_run_folder and shorts else None,
-                    allow_custom_value=False,
                 )
                 upload_title_box = gr.Textbox(
                     label="YouTube title",
@@ -877,30 +877,49 @@ def build_ui() -> gr.Blocks:
             upload_title = shorts[0][0]
             return "\n".join(lines), paths, upload_choices, upload_value, upload_title
 
-        def on_upload_short_change(folder_name, short_index):
-            if folder_name is None or short_index is None:
+        def on_upload_short_change(folder_name, short_title):
+            if folder_name is None or short_title is None:
                 return "", ""
+            # Gradio may send (label, value) as list or just the index (int)
+            if isinstance(short_title, (list, tuple)):
+                if len(short_title) >= 2 and isinstance(short_title[-1], int):
+                    short_title = short_title[-1]  # use index
+                elif len(short_title) >= 1:
+                    short_title = short_title[0]  # use title string
             shorts, _ = get_run_shorts(folder_name)
-            try:
-                idx = int(short_index)
-            except (TypeError, ValueError):
+            if not shorts:
                 return "", ""
-            if not (0 <= idx < len(shorts)):
+            idx = None
+            if isinstance(short_title, int) and 0 <= short_title < len(shorts):
+                idx = short_title
+            else:
+                idx = next((i for i, s in enumerate(shorts) if s[0] == short_title), None)
+            if idx is None:
                 return "", ""
             title, ts, _ = shorts[idx]
-            # Default description mentions video timestamp
             desc = f"Clip from longer video, generated at {ts}."
             return title, desc
 
-        def on_upload_click(folder_name, short_index, title, description, privacy):
+        def on_upload_click(folder_name, short_title, title, description, privacy):
             if folder_name is None:
                 return "Select a run and short first."
+            if short_title is None:
+                return "Select a short to upload."
+            # Gradio may send (label, value) as list or just the index (int)
+            if isinstance(short_title, (list, tuple)):
+                if len(short_title) >= 2 and isinstance(short_title[-1], int):
+                    short_title = short_title[-1]  # use index
+                elif len(short_title) >= 1:
+                    short_title = short_title[0]  # use title string
             shorts, _ = get_run_shorts(folder_name)
-            try:
-                idx = int(short_index)
-            except (TypeError, ValueError):
-                return "Select a valid short to upload."
-            if not (0 <= idx < len(shorts)):
+            if not shorts:
+                return "No shorts in this run."
+            idx = None
+            if isinstance(short_title, int) and 0 <= short_title < len(shorts):
+                idx = short_title
+            else:
+                idx = next((i for i, s in enumerate(shorts) if s[0] == short_title), None)
+            if idx is None:
                 return "Select a valid short to upload."
             _, _, path_str = shorts[idx]
             video_path = Path(path_str)
@@ -982,7 +1001,7 @@ def build_ui() -> gr.Blocks:
                     if sk == source_key:
                         run_choices = [(ts, fn) for fn, ts in run_list]
                         break
-                md, history_paths = on_history_select(run_folder)
+                md, history_paths, *_ = on_history_select(run_folder)
                 return (
                     msg,
                     paths,
