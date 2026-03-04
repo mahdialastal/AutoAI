@@ -5,7 +5,7 @@ from pathlib import Path
 
 from .download import get_video_path
 from .export import make_short, write_srt
-from .highlights import select_highlights
+from .highlights import select_highlights, generate_titles_for_chunks
 from .transcribe import segments_to_timestamped_chunks, transcribe
 from .focus import estimate_focus_x, detect_webcam_chat_regions, suggest_layout
 from .event_focus import estimate_event_crop, should_use_event_fallback
@@ -34,12 +34,12 @@ def run_pipeline(
     manual_webcam_bbox: tuple[float, float, float, float] | None = None,
     manual_chat_bbox: tuple[float, float, float, float] | None = None,
     manual_center_bbox: tuple[float, float, float, float] | None = None,
-) -> list[Path]:
+) -> tuple[list[Path], list[str]]:
     """
     Run the full pipeline: get video → transcribe → pick highlights → export shorts.
     output_dir: where to save generated shorts.
     download_dir: where to save downloaded videos (YouTube); if None, uses system temp.
-    Returns paths to generated short videos.
+    Returns (paths to generated short videos, list of titles for each short).
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -51,7 +51,7 @@ def run_pipeline(
     # 2. Transcribe
     full_text, segments = transcribe(video_path, model_size=whisper_model)
     if not segments:
-        return []
+        return ([], [])
 
     # 3. Chunk and select highlights
     chunks = segments_to_timestamped_chunks(segments, chunk_duration_sec=chunk_duration)
@@ -62,6 +62,11 @@ def run_pipeline(
         min_duration=min_duration,
         max_duration=max_duration,
     )
+    titles = generate_titles_for_chunks(selected, model=ollama_model)
+    # Ensure we have one title per selected clip
+    while len(titles) < len(selected):
+        titles.append(f"Short {len(titles) + 1}")
+    titles = titles[: len(selected)]
     # Slightly extend end of each clip so punch lines aren't cut off at chunk boundary
     video_duration_sec = max(s["end"] for s in segments) if segments else 0.0
     for chunk in selected:
@@ -177,4 +182,4 @@ def run_pipeline(
             center_bbox=center_bbox,
         )
         out_paths.append(out_path)
-    return out_paths
+    return (out_paths, titles)

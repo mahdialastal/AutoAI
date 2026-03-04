@@ -73,7 +73,7 @@ def main() -> None:
     download_dir = (app_root / "downloads") if is_url else None
 
     try:
-        paths = run_pipeline(
+        paths, titles = run_pipeline(
             source=args.source,
             output_dir=args.output_dir,
             download_dir=download_dir,
@@ -88,8 +88,9 @@ def main() -> None:
             focus_region=args.focus_region,
         )
         print(f"Generated {len(paths)} short(s):")
-        for path in paths:
-            print(f"  {path}")
+        for i, path in enumerate(paths):
+            title = titles[i] if i < len(titles) else f"Short {i+1}"
+            print(f"  {path}  — {title}")
     except FileNotFoundError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)

@@ -7,6 +7,23 @@ from pathlib import Path
 import yt_dlp
 
 
+def get_video_title(source: str) -> str | None:
+    """
+    For YouTube (or other) URLs, return the video title without downloading.
+    For local paths, return None (caller can use filename).
+    """
+    source = (source or "").strip()
+    if not source.startswith(("http://", "https://")):
+        return None
+    try:
+        opts = {"quiet": True, "no_warnings": True, "extract_flat": False}
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(source, download=False)
+            return (info or {}).get("title")
+    except Exception:
+        return None
+
+
 def get_video_path(source: str, download_dir: Path | None = None) -> Path:
     """
     If source is a URL, download with yt-dlp and return path to video.

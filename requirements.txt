@@ -14,3 +14,8 @@ gradio>=4.0.0
 # Utils
 python-dotenv>=1.0.0
 Pillow>=9.0.0
+
+# Optional: YouTube upload
+google-api-python-client>=2.130.0
+google-auth-httplib2>=0.2.0
+google-auth-oauthlib>=1.2.0

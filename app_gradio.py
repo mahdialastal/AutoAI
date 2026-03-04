@@ -24,7 +24,8 @@ if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
 
 from src.autoshorts.pipeline import run_pipeline
-from src.autoshorts.download import get_video_path
+from src.autoshorts.download import get_video_path, get_video_title
+from src.autoshorts.youtube_upload import upload_video_to_youtube
 
 PRESETS_FILE = APP_ROOT / "crop_presets.json"
 
@@ -156,7 +157,12 @@ def get_runs_by_source():
         lst[1].sort(key=lambda x: x[0], reverse=True)
     # Sort sources by most recent run
     order = sorted(by_source.items(), key=lambda x: x[1][1][0][0] if x[1][1] else "", reverse=True)
-    return [(sk, sl, runs) for sk, (sl, runs) in order]
+    # Prefer actual video title for URLs (helps when metadata only had video ID)
+    out = []
+    for sk, (sl, runs) in order:
+        display_label = (get_video_title(sk) or sl) if (sk and sk.startswith(("http://", "https://"))) else sl
+        out.append((sk, display_label, runs))
+    return out
 
 
 def get_run_shorts(folder_name):
@@ -375,7 +381,7 @@ def generate(
         output_dir = APP_ROOT / "generated" / run_folder
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        paths = run_pipeline(
+        paths, titles = run_pipeline(
             source=source,
             output_dir=output_dir,
             download_dir=download_dir,
@@ -395,13 +401,14 @@ def generate(
         if not paths:
             return "No segments found (empty or very short transcript).", [], None
         path_strs = [str(p.resolve()) for p in paths]
-        # Save run metadata (titles + timestamp) for History
+        # Ensure one title per short (fallback if LLM returned fewer)
+        title_list = [titles[i] if i < len(titles) else f"Short {i+1}" for i in range(len(paths))]
         run_ts = run_folder.replace("_", " ", 1)  # "2026-03-03 23-15-42"
         meta = {
             "run_timestamp": run_ts,
             "source": source,
-            "source_label": _source_label(source),
-            "shorts": [{"file": p.name, "title": f"Short {i+1}"} for i, p in enumerate(paths)],
+            "source_label": (get_video_title(source) or _source_label(source)),
+            "shorts": [{"file": p.name, "title": title_list[i]} for i, p in enumerate(paths)],
         }
         (output_dir / "run_metadata.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
         return (
@@ -786,9 +793,44 @@ def build_ui() -> gr.Blocks:
                     value=_initial_paths,
                 )
 
+                # YouTube upload controls
+                upload_short_dropdown = gr.Dropdown(
+                    label="Short to upload",
+                    choices=[(s[0], i) for i, s in enumerate(shorts)] if first_run_folder and shorts else [],
+                    value=0 if first_run_folder and shorts else None,
+                    allow_custom_value=False,
+                )
+                upload_title_box = gr.Textbox(
+                    label="YouTube title",
+                    value=shorts[0][0] if first_run_folder and shorts else "",
+                )
+                upload_desc_box = gr.Textbox(
+                    label="YouTube description (optional)",
+                    value="",
+                    lines=3,
+                )
+                upload_privacy = gr.Dropdown(
+                    label="YouTube privacy",
+                    choices=["public", "unlisted", "private"],
+                    value="unlisted",
+                    allow_custom_value=False,
+                )
+                upload_status = gr.Markdown(value="")
+                upload_btn = gr.Button("Upload selected short to YouTube")
+
         def on_history_video_select(source_key):
             if not source_key:
-                return gr.update(choices=[], value=None), "Select a video above.", []
+                # Clear runs, list, gallery, and upload UI
+                return (
+                    gr.update(choices=[], value=None),
+                    "Select a video above.",
+                    [],
+                    gr.update(choices=[], value=None),
+                    "",
+                    "",
+                    "unlisted",
+                    "",
+                )
             by_source = get_runs_by_source()
             runs = []
             for sk, _, run_list in by_source:
@@ -796,31 +838,126 @@ def build_ui() -> gr.Blocks:
                     runs = [(ts, fn) for fn, ts in run_list]
                     break
             if not runs:
-                return gr.update(choices=[], value=None), "No runs for this video.", []
+                return (
+                    gr.update(choices=[], value=None),
+                    "No runs for this video.",
+                    [],
+                    gr.update(choices=[], value=None),
+                    "",
+                    "",
+                    "unlisted",
+                    "",
+                )
             first_folder = runs[0][1]
-            md, paths = on_history_select(first_folder)
-            return gr.update(choices=runs, value=first_folder), md, paths
+            md, paths, upload_choices, upload_value, upload_title = on_history_select(
+                first_folder
+            )
+            return (
+                gr.update(choices=runs, value=first_folder),
+                md,
+                paths,
+                gr.update(choices=upload_choices, value=upload_value),
+                upload_title,
+                "",
+                "unlisted",
+                "",
+            )
 
         def on_history_select(folder_name):
             if not folder_name:
-                return "Select a run above.", []
+                return "Select a run above.", [], [], None, ""
             shorts, paths = get_run_shorts(folder_name)
             if not shorts:
-                return "No shorts in this run.", []
+                return "No shorts in this run.", [], [], None, ""
             lines = ["| Title | Generated |", "|-------|-----------|"]
             for title, ts, _ in shorts:
                 lines.append(f"| **{title}** | {ts} |")
-            return "\n".join(lines), paths
+            upload_choices = [(s[0], i) for i, s in enumerate(shorts)]
+            upload_value = 0
+            upload_title = shorts[0][0]
+            return "\n".join(lines), paths, upload_choices, upload_value, upload_title
+
+        def on_upload_short_change(folder_name, short_index):
+            if folder_name is None or short_index is None:
+                return "", ""
+            shorts, _ = get_run_shorts(folder_name)
+            try:
+                idx = int(short_index)
+            except (TypeError, ValueError):
+                return "", ""
+            if not (0 <= idx < len(shorts)):
+                return "", ""
+            title, ts, _ = shorts[idx]
+            # Default description mentions video timestamp
+            desc = f"Clip from longer video, generated at {ts}."
+            return title, desc
+
+        def on_upload_click(folder_name, short_index, title, description, privacy):
+            if folder_name is None:
+                return "Select a run and short first."
+            shorts, _ = get_run_shorts(folder_name)
+            try:
+                idx = int(short_index)
+            except (TypeError, ValueError):
+                return "Select a valid short to upload."
+            if not (0 <= idx < len(shorts)):
+                return "Select a valid short to upload."
+            _, _, path_str = shorts[idx]
+            video_path = Path(path_str)
+            try:
+                url = upload_video_to_youtube(
+                    video_path,
+                    title=title or video_path.stem,
+                    description=description or "",
+                    privacy_status=privacy or "unlisted",
+                    client_secrets_file=APP_ROOT / "youtube_client_secret.json",
+                    token_file=APP_ROOT / "youtube_token.json",
+                )
+                return f"**Uploaded!** [Open on YouTube]({url})"
+            except Exception as e:
+                return f"Upload failed: `{e}`"
 
         history_video_dropdown.change(
             on_history_video_select,
             inputs=[history_video_dropdown],
-            outputs=[history_run_dropdown, history_list_md, history_gallery],
+            outputs=[
+                history_run_dropdown,
+                history_list_md,
+                history_gallery,
+                upload_short_dropdown,
+                upload_title_box,
+                upload_desc_box,
+                upload_privacy,
+                upload_status,
+            ],
         )
         history_run_dropdown.change(
             on_history_select,
             inputs=[history_run_dropdown],
-            outputs=[history_list_md, history_gallery],
+            outputs=[
+                history_list_md,
+                history_gallery,
+                upload_short_dropdown,
+                upload_short_dropdown,
+                upload_title_box,
+            ],
+        )
+
+        upload_short_dropdown.change(
+            on_upload_short_change,
+            inputs=[history_run_dropdown, upload_short_dropdown],
+            outputs=[upload_title_box, upload_desc_box],
+        )
+        upload_btn.click(
+            on_upload_click,
+            inputs=[
+                history_run_dropdown,
+                upload_short_dropdown,
+                upload_title_box,
+                upload_desc_box,
+                upload_privacy,
+            ],
+            outputs=[upload_status],
         )
 
         def on_generate(url, vid, n, mode, crop, focus, letterbox, use_man, wl, wt, wr, wb, cl, ct, cr, cb, ml, mt, mr, mb):

@@ -2,6 +2,10 @@
 generated/
 downloads/
 
+# YouTube OAuth (user-specific secrets)
+youtube_client_secret.json
+youtube_token.json
+
 # Python
 venv/
 __pycache__/
