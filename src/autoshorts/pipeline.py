@@ -20,8 +20,8 @@ def run_pipeline(
     ollama_model: str = "mistral",
     chunk_duration: float = 15.0,
     min_duration: float = 15.0,
-    max_duration: float = 60.0,
-    clip_end_padding_sec: float = 5.0,
+    max_duration: float = 45.0,
+    clip_end_padding_sec: float = 3.0,
     burn_captions: bool = True,
     smart_crop: bool = True,
     crop_mode: str = "bottom_split_stack",
@@ -68,10 +68,14 @@ def run_pipeline(
     # Align clip boundaries to full sentences, extend end for punch lines,
     # and enforce a hard max_duration for shorts.
     video_duration_sec = max(s["end"] for s in segments) if segments else 0.0
+    max_start_walkback_sec = 12.0  # don't pull start back more than this
+    max_start_walkback_segments = 6
+
     for chunk in selected:
         start_sec = chunk["start"]
         end_sec = chunk["end"]
-        # Trim start back to a sentence boundary (don't start mid-sentence)
+        # Trim start back to a sentence boundary (don't start mid-sentence).
+        # Find first segment overlapping the clip.
         i0 = None
         for i, s in enumerate(segments):
             if s["end"] <= start_sec:
@@ -81,16 +85,30 @@ def run_pipeline(
             i0 = i
             break
         if i0 is not None and i0 > 0:
-            # Walk back to a segment that starts a sentence (previous ends with .?!)
-            while i0 > 0:
+            original_start = start_sec
+            walked = 0
+            while i0 > 0 and walked < max_start_walkback_segments:
                 prev_text = (segments[i0 - 1].get("text") or "").strip().rstrip()
+                # Stop at sentence end (previous segment ends with .?!)
                 if prev_text and prev_text[-1] in ".?!…":
                     break
+                # Or stop if this segment looks like a sentence start (starts with capital)
+                cur_text = (segments[i0].get("text") or "").strip()
+                if cur_text and cur_text[0].isupper():
+                    break
+                # Don't walk back more than max_start_walkback_sec
+                candidate_start = segments[i0 - 1]["start"]
+                if original_start - candidate_start > max_start_walkback_sec:
+                    break
                 i0 -= 1
+                walked += 1
             start_sec = segments[i0]["start"]
+            if original_start - start_sec > max_start_walkback_sec:
+                start_sec = original_start - max_start_walkback_sec
             chunk["start"] = start_sec
-        # Extend end to include trailing segments (punch line often in next phrase),
-        # but never exceed max_duration so clips keep natural length (e.g. 20–45s).
+
+        # Extend end to include the payoff (punch line often in next phrase).
+        # Include extra segments until we hit a sentence end or cap.
         end_sec = chunk["end"]
         last_idx = -1
         for i, s in enumerate(segments):
@@ -98,12 +116,16 @@ def run_pipeline(
                 last_idx = i
         max_end = chunk["start"] + max_duration
         if last_idx >= 0:
-            extra_segments = 2
-            extra_sec = 8.0
+            extra_segments = 5
+            extra_sec = 15.0
             for j in range(last_idx + 1, min(last_idx + 1 + extra_segments, len(segments))):
                 seg_end = segments[j]["end"]
                 if seg_end <= max_end and seg_end - end_sec <= extra_sec:
                     end_sec = seg_end
+                    # Stop after a sentence end so we don't cut the punchline
+                    txt = (segments[j].get("text") or "").strip().rstrip()
+                    if txt and txt[-1] in ".?!…":
+                        break
                 else:
                     break
         desired_end = min(end_sec + clip_end_padding_sec, video_duration_sec, max_end)

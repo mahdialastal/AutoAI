@@ -17,7 +17,7 @@ def select_highlights(
     num_clips: int = 3,
     model: str = "mistral",
     min_duration: float = 15.0,
-    max_duration: float = 60.0,
+    max_duration: float = 45.0,
 ) -> list[dict]:
     """
     Ask Ollama to pick the best num_clips moments and their exact boundaries (start/end chunk index).
@@ -43,7 +43,7 @@ Your job: pick exactly {num_clips} highlights. For EACH highlight you must choos
 CRITICAL RULES:
 - Reply with ONLY a JSON array of objects, each with "start_idx" and "end_idx" (integers). Example: [{{"start_idx": 0, "end_idx": 1}}, {{"start_idx": 5, "end_idx": 7}}]. No other text.
 - Each highlight must be between {min_duration:.0f} and {max_duration:.0f} seconds. Use the duration in parentheses to compute length (sum or use end - start of the range).
-- Prefer the SHORTEST range that contains the full moment: if one segment has hook + payoff, pick just that. Only span multiple segments when the moment needs it. Do NOT pad to 60s.
+- Prefer the SHORTEST range that contains the full moment: if one segment has hook + payoff, pick just that. Only span multiple segments when the moment needs it. Do NOT pad to {max_duration:.0f}s — end the range at the payoff (punch line, conclusion), not before it.
 - Pick moments that:
   • Start with a strong hook (question, bold claim, surprise) and end with a payoff (punch line, conclusion, reveal).
   • Are self-contained (viewer needs no prior context).

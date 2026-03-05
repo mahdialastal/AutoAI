@@ -200,24 +200,18 @@ def get_run_shorts(folder_name):
     return shorts, paths_only, full_transcript
 
 
-def _format_transcript_md(full_transcript: str, shorts: list[tuple]) -> str:
-    """Format full transcript and per-short transcripts for History tab display."""
-    parts = []
-    if full_transcript and full_transcript.strip():
-        parts.append("### Full video transcript\n\n")
-        parts.append(full_transcript.strip())
-    else:
-        parts.append("### Full video transcript\n\n*No transcript saved for this run.*")
-    if shorts:
-        parts.append("\n\n---\n\n### Shorts\n\n")
-        for i, (title, _ts, _path, transcript) in enumerate(shorts, 1):
-            parts.append(f"**{i}. {title}**\n\n")
-            if transcript and transcript.strip():
-                parts.append(transcript.strip())
-            else:
-                parts.append("*No transcript saved for this short.*")
-            parts.append("\n\n")
-    return "".join(parts).strip()
+def _get_transcript_for_selection(folder_name: str | None, choice_index: int) -> str:
+    """Return transcript text for the given run and selection: 0 = full video, 1+ = short index."""
+    if not folder_name:
+        return ""
+    shorts, _, full_transcript = get_run_shorts(folder_name)
+    if choice_index == 0:
+        return (full_transcript or "").strip() or "*No full transcript saved for this run.*"
+    i = choice_index - 1
+    if 0 <= i < len(shorts):
+        _, _, _, transcript = shorts[i]
+        return (transcript or "").strip() or "*No transcript saved for this short.*"
+    return ""
 
 
 def preview_manual_regions(
@@ -810,22 +804,40 @@ def build_ui() -> gr.Blocks:
                 if first_run_folder:
                     shorts, _initial_paths, _full_transcript = get_run_shorts(first_run_folder)
                     if shorts:
-                        _lines = ["| Title | Generated |", "|-------|-----------|"]
+                        _lines = ["| Title | Generated | Transcript |", "|-------|-----------|------------|"]
                         for _t, _ts, _p, _ in shorts:
-                            _lines.append(f"| **{_t}** | {_ts} |")
+                            _lines.append(f"| **{_t}** | {_ts} | *view below* |")
                         _initial_md = "\n".join(_lines)
                         _initial_paths = [(path_str, title) for title, _ts, path_str, _ in shorts]
-                        _initial_transcript = _format_transcript_md(_full_transcript, shorts)
+                        _transcript_choices = [("Full video", 0)] + [(f"Short {i+1}: {t}", i + 1) for i, (t, _, _, _) in enumerate(shorts)]
+                        _transcript_value = 0
+                        _initial_transcript = _get_transcript_for_selection(first_run_folder, 0)
                     else:
                         _initial_md, _initial_paths = "No shorts in this run.", []
+                        _transcript_choices = [("Full video", 0)]
+                        _transcript_value = 0
                         _initial_transcript = ""
                 else:
                     _initial_md, _initial_paths = "Select a video and run above.", []
+                    _transcript_choices = [("Full video", 0)]
+                    _transcript_value = 0
                     _initial_transcript = ""
                 history_list_md = gr.Markdown(
                     value=_initial_md,
                     label="Shorts in this run",
                 )
+                with gr.Accordion("Transcript", open=False):
+                    transcript_dropdown = gr.Dropdown(
+                        choices=_transcript_choices,
+                        value=_transcript_value,
+                        label="Show transcript",
+                        allow_custom_value=False,
+                    )
+                    history_transcript_md = gr.Markdown(
+                        value=_initial_transcript,
+                        label="",
+                        elem_id="history-transcript-content",
+                    )
                 history_gallery = gr.Gallery(
                     label="Play shorts",
                     columns=1,
@@ -875,6 +887,7 @@ def build_ui() -> gr.Blocks:
                     "",
                     "unlisted",
                     "",
+                    gr.update(choices=[("Full video", 0)], value=0),
                     "",
                 )
             by_source = get_runs_by_source()
@@ -893,10 +906,11 @@ def build_ui() -> gr.Blocks:
                     "",
                     "unlisted",
                     "",
+                    gr.update(choices=[("Full video", 0)], value=0),
                     "",
                 )
             first_folder = runs[0][1]
-            md, paths, upload_radio_update, upload_title, transcript_md = on_history_select(first_folder)
+            md, paths, upload_radio_update, upload_title, transcript_dd_update, transcript_content = on_history_select(first_folder)
             return (
                 gr.update(choices=runs, value=first_folder),
                 md,
@@ -906,24 +920,26 @@ def build_ui() -> gr.Blocks:
                 "",
                 "unlisted",
                 "",
-                transcript_md,
+                transcript_dd_update,
+                transcript_content,
             )
 
         def on_history_select(folder_name):
             if not folder_name:
-                return "Select a run above.", [], gr.update(choices=[], value=None), "", ""
+                return "Select a run above.", [], gr.update(choices=[], value=None), "", gr.update(choices=[("Full video", 0)], value=0), ""
             shorts, paths, full_transcript = get_run_shorts(folder_name)
             if not shorts:
-                return "No shorts in this run.", [], gr.update(choices=[], value=None), "", ""
-            lines = ["| Title | Generated |", "|-------|-----------|"]
+                return "No shorts in this run.", [], gr.update(choices=[], value=None), "", gr.update(choices=[("Full video", 0)], value=0), ""
+            lines = ["| Title | Generated | Transcript |", "|-------|-----------|------------|"]
             for title, ts, _path, _ in shorts:
-                lines.append(f"| **{title}** | {ts} |")
+                lines.append(f"| **{title}** | {ts} | *view below* |")
             gallery_value = [(path_str, title) for title, ts, path_str, _ in shorts]
             upload_choices = [(s[0], i) for i, s in enumerate(shorts)]
             upload_value = 0
             upload_title = shorts[0][0]
-            transcript_md = _format_transcript_md(full_transcript, shorts)
-            return "\n".join(lines), gallery_value, gr.update(choices=upload_choices, value=upload_value), upload_title, transcript_md
+            transcript_choices = [("Full video", 0)] + [(f"Short {i+1}: {t}", i + 1) for i, (t, _, _, _) in enumerate(shorts)]
+            transcript_content = _get_transcript_for_selection(folder_name, 0)
+            return "\n".join(lines), gallery_value, gr.update(choices=upload_choices, value=upload_value), upload_title, gr.update(choices=transcript_choices, value=0), transcript_content
 
         def on_upload_short_change(folder_name, short_title):
             if folder_name is None or short_title is None:
@@ -947,6 +963,17 @@ def build_ui() -> gr.Blocks:
             title, ts, _, _ = shorts[idx]
             desc = f"Clip from longer video, generated at {ts}."
             return title, desc
+
+        def on_transcript_select(folder_name, choice_value):
+            if folder_name is None:
+                return ""
+            idx = 0
+            if choice_value is not None:
+                try:
+                    idx = int(choice_value)
+                except (TypeError, ValueError):
+                    idx = 0
+            return _get_transcript_for_selection(folder_name, idx)
 
         def on_upload_click(folder_name, short_title, title, description, privacy):
             if folder_name is None:
@@ -996,6 +1023,7 @@ def build_ui() -> gr.Blocks:
                 upload_desc_box,
                 upload_privacy,
                 upload_status,
+                transcript_dropdown,
                 history_transcript_md,
             ],
         )
@@ -1007,8 +1035,14 @@ def build_ui() -> gr.Blocks:
                 history_gallery,
                 upload_short_dropdown,
                 upload_title_box,
+                transcript_dropdown,
                 history_transcript_md,
             ],
+        )
+        transcript_dropdown.change(
+            on_transcript_select,
+            inputs=[history_run_dropdown, transcript_dropdown],
+            outputs=[history_transcript_md],
         )
 
         upload_short_dropdown.change(
@@ -1050,7 +1084,7 @@ def build_ui() -> gr.Blocks:
                     if sk == source_key:
                         run_choices = [(ts, fn) for fn, ts in run_list]
                         break
-                md, history_paths, _r, _t, transcript_md = on_history_select(run_folder)
+                md, history_paths, _r, _t, transcript_dd_update, transcript_content = on_history_select(run_folder)
                 return (
                     msg,
                     paths,
@@ -1058,9 +1092,10 @@ def build_ui() -> gr.Blocks:
                     gr.update(choices=run_choices, value=run_folder),
                     md,
                     history_paths,
-                    transcript_md,
+                    transcript_dd_update,
+                    transcript_content,
                 )
-            return msg, paths, gr.update(), gr.update(), "Select a video and run above.", [], ""
+            return msg, paths, gr.update(), gr.update(), "Select a video and run above.", [], gr.update(choices=[("Full video", 0)], value=0), ""
 
         run_btn.click(
             fn=on_generate,
@@ -1087,7 +1122,7 @@ def build_ui() -> gr.Blocks:
                 m_right,
                 m_bottom,
             ],
-            outputs=[msg_out, gallery, history_video_dropdown, history_run_dropdown, history_list_md, history_gallery, history_transcript_md],
+            outputs=[msg_out, gallery, history_video_dropdown, history_run_dropdown, history_list_md, history_gallery, transcript_dropdown, history_transcript_md],
         )
     return app
 
@@ -1096,5 +1131,5 @@ if __name__ == "__main__":
     app = build_ui()
     app.launch(
         theme=gr.themes.Soft(),
-        css=".video-container { max-width: 100%; margin: 0 auto; } .gr-video { border-radius: 12px; overflow: hidden; }",
+        css=".video-container { max-width: 100%; margin: 0 auto; } .gr-video { border-radius: 12px; overflow: hidden; } #history-transcript-content { max-height: 320px; overflow-y: auto; }",
     )
