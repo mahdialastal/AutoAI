@@ -520,12 +520,7 @@ def run_ui(
 
 def build_ui() -> gr.Blocks:
     with gr.Blocks(title="MarkSoft AutoShorts") as app:
-        gr.Markdown("# MarkSoft AutoShorts — Turn videos into shorts locally")
-        gr.Markdown(
-            "Paste a link or upload a video, choose a layout, generate. "
-            "We auto-detect the best moments, add captions, and reframe for vertical (9:16). "
-            "All processing runs on your machine."
-        )
+        gr.Markdown("# MarkSoft AutoShorts")
 
         with gr.Row():
             input_mode = gr.Radio(
@@ -556,12 +551,7 @@ def build_ui() -> gr.Blocks:
             info="Model used to pick moments and generate titles. Stronger models may give better clips.",
         )
         gr.Markdown("### 2. Layout")
-        gr.Markdown(
-            "**Screen recording of a feed or event/news clip?** → Choose **Event / news**. "
-            "**Actual stream with webcam + chat on screen?** → **Streaming**. "
-            "If the webcam and chat are in the **bottom** of the screen (webcam left, chat right), pick **Streaming (webcam bottom-left, chat bottom-right)** so we use those two areas only. "
-            "**Single speaker (talking head)?** → **Speaker only** or **Auto**."
-        )
+
         with gr.Row():
             crop_mode = gr.Dropdown(
                 [
@@ -623,10 +613,6 @@ def build_ui() -> gr.Blocks:
                 delete_preset_btn = gr.Button("Delete selected")
             preset_status = gr.Textbox(label="Preset status", interactive=False, visible=True)
 
-            gr.Markdown(
-                "Same idea for all three: **Left / Top / Right / Bottom %** define a rectangle on the full video (0–100). "
-                "**Webcam** = top of the short, **Chat** = bottom, **Middle** = the strip in between (gap fill)."
-            )
             with gr.Row():
                 with gr.Column():
                     gr.Markdown("**Webcam** (top of short)")
@@ -646,10 +632,7 @@ def build_ui() -> gr.Blocks:
                     m_top = gr.Number(value=25, label="Top %", minimum=0, maximum=100)
                     m_right = gr.Number(value=75, label="Right %", minimum=0, maximum=100)
                     m_bottom = gr.Number(value=75, label="Bottom %", minimum=0, maximum=100)
-            gr.Markdown(
-                "**Tip:** Middle uses the same 4 numbers as webcam/chat. Default 25–75 is the center of the frame. "
-                "If the middle looks wrong (e.g. head cropped), try **lower Top %** to capture higher, or **higher Bottom %** to capture lower."
-            )
+
             with gr.Row():
                 preview_btn = gr.Button("Preview regions on a frame")
                 preview_final_btn = gr.Button("Preview final layout (9:16)")
@@ -776,7 +759,6 @@ def build_ui() -> gr.Blocks:
                     height="auto",
                 )
             with gr.TabItem("History"):
-                gr.Markdown("Browse by **source video**, then pick a run to see and play the shorts.")
                 by_source = get_runs_by_source()
                 # Dropdown 1: From video (source)
                 video_choices = [

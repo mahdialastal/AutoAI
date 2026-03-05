@@ -18,34 +18,33 @@ Turn long videos or YouTube links into short clips (Shorts / Reels / TikTok) usi
 
 ## How clip selection works (workflow)
 
-The app uses **transcript + AI** to decide what to clip. Clips are aligned to **fixed-length chunks**, so punch lines near a chunk boundary can sometimes be cut. Here’s the full flow and how we reduce that.
+The app uses **transcript + AI** to decide what to clip. Clips are aligned to **sentence boundaries** and extended to include the payoff (punch line). Here’s the flow.
 
 **1. Transcribe the video**  
 [faster-whisper](https://github.com/SYSTRAN/faster-whisper) turns speech into **segments**: short phrases with start/end times (e.g. “So then he said…” from 12.3s to 14.1s). No AI yet — just speech-to-text.
 
 **2. Build chunks**  
-Segments are grouped into **chunks** of roughly **30 seconds** (configurable via `--chunk-duration`). Each chunk has one start time, one end time, and the combined text. Boundaries are **time-based**, not “per sentence,” so a punch line that crosses 30s might sit on a chunk edge.
+Segments are grouped into **chunks** of roughly **15–30 seconds** (configurable: `--chunk-duration` in CLI; app uses 15s). Chunks break at **sentence boundaries** when possible so the LLM sees coherent blocks.
 
-**3. AI picks the best chunks**  
-Your local LLM ([Ollama](https://ollama.ai), e.g. Mistral) sees the list of chunks (timestamps + first 200 characters of text) and is asked: *“Which N chunks would make the best viral shorts?”* It prefers strong hooks, clear ideas, and punchy moments. It returns **chunk indices** (e.g. [2, 5, 7]). Those chunks become your N shorts.
+**3. AI picks the best ranges**  
+Your local LLM ([Ollama](https://ollama.ai), e.g. Mistral) sees the list of chunks (timestamps + text) and returns **ranges** (start chunk index → end chunk index) for the best N moments. It’s asked to prefer strong hooks, clear payoff, and to **end at the punch line**, not before it. Each range becomes one short.
 
-**4. Clip boundaries and punch-line safeguard**  
-Each short is cut at the chunk’s **start** and **end**. To avoid cutting off the very end of a line (e.g. the punch line), the pipeline **adds a few seconds** after each chunk end (default **5 seconds**), capped at the video length. So a chunk that originally ended at 30s is exported as 30s–35s (or to the end of the video). You can tune this later via a CLI/UI option if needed.
+**4. Clip boundaries (no mid-sentence, include payoff)**  
+- **Start:** The pipeline moves the start **back to a sentence boundary** (previous segment ends with `.?!` or segment starts with a capital), so clips don’t start mid-sentence. Walk-back is capped at **12 seconds** so we don’t pull in too much.
+- **End:** The end is **extended** to include the next few segments (up to ~15s) and **stops at a sentence end** (`.?!`) so the punch line isn’t cut off. A small **end padding** (default 3s) is added, and total length is capped at **45 seconds** by default (configurable via `--max-duration`).
 
 **5. Export**  
-For each selected chunk (with the padded end), the app cuts the video, applies your layout (crop/reframe), burns captions, and saves a 9:16 MP4.
+For each clip (with these boundaries), the app cuts the video, applies your layout (crop/reframe), burns captions, and saves a 9:16 MP4. Full and per-short transcripts are saved in the run folder and shown in the **History** tab.
 
 **Summary**
 
 | Step | What happens |
 |------|----------------------|
 | 1. Transcribe | Whisper → segments (phrase-level start/end + text) |
-| 2. Chunk | Group segments into ~30s chunks (time-based boundaries) |
-| 3. Select | Ollama picks N “best for shorts” chunks from the transcript |
-| 4. Pad ends | Add a few seconds after each chunk end (punch-line safeguard) |
-| 5. Export | Cut video, crop to layout, burn captions → short |
-
-So: **yes, the AI uses a transcript and analyzes it** — it doesn’t watch the video, only the chunked text and timestamps. If a clip still cuts off a punch line, the line may be right at the end of the padded window; increasing chunk duration or adding a “clip end padding” option later can help.
+| 2. Chunk | Group segments into ~15–30s chunks (sentence boundaries when possible) |
+| 3. Select | Ollama picks N ranges (start_idx → end_idx) for best moments; end at payoff |
+| 4. Boundaries | Start: sentence-bound (cap 12s back). End: extend for payoff, stop at sentence, cap 45s |
+| 5. Export | Cut video, crop to layout, burn captions, save transcripts → short |
 
 ---
 
@@ -148,7 +147,22 @@ Click **Generate shorts**. The app will:
 **Where files go:**
 
 - **Downloads:** `downloads/` (YouTube videos).
-- **Generated shorts:** `generated/YYYY-MM-DD_HH-MM-SS/` (one folder per run; e.g. `short_1.mp4`, `short_2.mp4`).
+- **Generated shorts:** `generated/YYYY-MM-DD_HH-MM-SS/` (one folder per run): `short_1.mp4`, `short_2.mp4`, … and `run_metadata.json` (titles, full transcript, per-short transcripts).
+
+### 8. History and transcripts
+
+- **From video / Run** — Browse past runs by source video and timestamp. The table lists each short’s title and generation time; the **Transcript** column points to the transcript viewer below.
+- **Transcript** — Open the **Transcript** accordion and use **Show transcript** to pick **Full video** or **Short 1: &lt;title&gt;** (etc.). One transcript is shown at a time in a scrollable area. Older runs without saved transcripts show a placeholder message.
+
+### 9. Optional: YouTube upload
+
+To upload a generated short to YouTube from the app, you need OAuth credentials:
+
+1. Create a project in [Google Cloud Console](https://console.cloud.google.com/) and enable the YouTube Data API v3.
+2. Create OAuth 2.0 credentials (Desktop app). Download the JSON and save it as `youtube_client_secret.json` in the project root.
+3. The first time you click **Upload selected short to YouTube**, the app will open a browser to sign in and save a token to `youtube_token.json` (both files are in `.gitignore`).
+
+Then use **Short to upload**, set title/description and privacy, and click **Upload selected short to YouTube**.
 
 ---
 
@@ -161,8 +175,8 @@ Click **Generate shorts**. The app will:
 | `-n`, `--num-clips` | Number of shorts to generate | 3 |
 | `--whisper-model` | Whisper size: tiny, base, small, medium, large-v2, large-v3 | base |
 | `--ollama-model` | Ollama model for highlight selection | mistral |
-| `--chunk-duration` | Chunk length (sec) for LLM | 30 |
-| `--min-duration` / `--max-duration` | Clip length range (sec) | 15–60 |
+| `--chunk-duration` | Chunk length (sec) for LLM analysis | 30 |
+| `--min-duration` / `--max-duration` | Min/max clip length (sec) | 15 / 45 |
 | `--no-captions` | Skip burning captions | off |
 
 Example with more clips and a custom output folder:
@@ -176,13 +190,16 @@ python cli.py "https://youtube.com/watch?v=VIDEO_ID" -o ./my_shorts -n 5
 ## Features (current)
 
 - YouTube URL + local file input  
-- Transcription (faster-whisper), AI highlight selection (Ollama)  
+- Transcription (faster-whisper), AI highlight selection (Ollama), sentence-bound clip boundaries, payoff extension  
+- Default clip length 15–45s (configurable); start at sentence, end after punch line  
 - Layouts: Auto, Event/news, Streaming (two variants), Speaker only, Split screen  
 - Full frame vs screen recording (crop to center)  
 - Fill frame vs full-width letterbox output  
 - Manual crop regions for webcam, chat, and middle (gap fill) with presets  
 - Preview regions on a frame + preview final 9:16 layout  
 - Burned-in captions (SRT → FFmpeg)  
+- **History tab:** browse runs by video and timestamp; **Transcript** dropdown (full video or per short) in a single scrollable view  
+- Optional YouTube upload (OAuth: `youtube_client_secret.json` + `youtube_token.json`)  
 - 9:16 MP4 (H.264), 100% local
 
 See **[docs/FEATURE_PARITY.md](docs/FEATURE_PARITY.md)** for the full feature list and possible roadmap.  
@@ -196,7 +213,7 @@ See **[docs/TOOLS_AND_SETUP.md](docs/TOOLS_AND_SETUP.md)** for tools (FFmpeg, Wh
 - **Ollama errors** — Ensure Ollama is running and you’ve run `ollama pull mistral` (or the model you use).
 - **Cropping wrong for streaming** — Use **Set crop regions yourself**, enter Left/Top/Right/Bottom % for webcam and chat, enable **Use my crop regions**, then **Preview regions on a frame** to confirm before generating.
 - **Middle part looks off** — Adjust the **Middle** column (Left/Top/Right/Bottom %). Lower **Top %** to include more above the subject; use **Preview final layout (9:16)** to check.
-- **Punch line or end of clip is cut off** — Clips are based on fixed-length chunks (see [How clip selection works](#how-clip-selection-works-workflow)). We add 5 seconds after each chunk end to reduce this. If it still happens, the line may be beyond that; try a larger Whisper model or a longer `--chunk-duration` (CLI) so chunks align better with sentences.
+- **Punch line or end of clip is cut off** — The pipeline trims the start to a sentence boundary (up to 12s back) and extends the end to include the next phrase and stop at a sentence end (`.?!`), capped at `--max-duration` (default 45s). If a line is still cut, try a larger Whisper model (better punctuation) or increase `--max-duration`. Transcripts in **History → Transcript** let you confirm what was included.
 
 ---
 

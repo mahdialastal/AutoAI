@@ -56,8 +56,8 @@ def main() -> None:
     p.add_argument(
         "--max-duration",
         type=float,
-        default=60.0,
-        help="Maximum clip length in seconds (default: 60)",
+        default=45.0,
+        help="Maximum clip length in seconds (default: 45)",
     )
     p.add_argument(
         "--no-captions",
@@ -73,7 +73,7 @@ def main() -> None:
     download_dir = (app_root / "downloads") if is_url else None
 
     try:
-        paths, titles = run_pipeline(
+        paths, titles, *_ = run_pipeline(
             source=args.source,
             output_dir=args.output_dir,
             download_dir=download_dir,
