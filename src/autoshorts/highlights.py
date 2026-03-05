@@ -8,7 +8,8 @@ from typing import Any
 import ollama
 
 # How much of each chunk's text to show the LLM (need enough to see hook + payoff)
-CHUNK_TEXT_MAX_CHARS = 500
+CHUNK_TEXT_MAX_CHARS = 700
+TITLE_CHUNK_MAX_CHARS = 800
 
 
 def select_highlights(
@@ -48,7 +49,10 @@ RULES:
   • Start mid-sentence or depend on something said earlier in the video.
   • Are mostly setup with no payoff in that segment.
   • Are filler, repetition, or long pauses.
+  • Start with weak intros like "So...", "Anyway...", "Um...", or end abruptly mid-thought.
 - Prefer variety: if picking multiple, choose different types of moments (e.g. one hook, one emotional, one surprising) rather than three similar ones.
+- Good clip: opens with a clear hook, has a payoff (punch line, reveal, conclusion) before the end. Bad clip: long wind-up, no payoff in the segment, or cuts off right before the key line.
+- Segments are built to break at sentence boundaries. Prefer ones where the text clearly starts a complete thought and ends with a conclusion or punch line (not trailing off or cut mid-sentence).
 
 Transcript segments (index, time range, duration, text):
 {transcript_block}
@@ -81,7 +85,7 @@ def generate_titles_for_chunks(chunks: list[dict], model: str = "mistral") -> li
         return []
     lines = []
     for i, c in enumerate(chunks):
-        text = (c.get("text") or "").strip()[:600]
+        text = (c.get("text") or "").strip()[:TITLE_CHUNK_MAX_CHARS]
         lines.append(f"[Clip {i + 1}]\n{text}")
     block = "\n\n".join(lines)
 
@@ -89,7 +93,8 @@ def generate_titles_for_chunks(chunks: list[dict], model: str = "mistral") -> li
 
 RULES:
 - One title per clip, in the same order as the clips ([Clip 1], [Clip 2], ...).
-- Each title: 3–8 words, catchy and accurate to the content. No quotes, no colons.
+- Each title: 3–8 words, catchy and accurate to the content. No quotes, no colons. Make it something that would get clicks.
+- Match the tone: if the clip is serious, the title can be bold; if it's funny, the title can be punchy or playful.
 - Reply with ONLY a JSON array of strings, e.g. ["First title here", "Second title here"]. Nothing else.
 
 Clips:

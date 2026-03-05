@@ -67,10 +67,50 @@ def run_pipeline(
     while len(titles) < len(selected):
         titles.append(f"Short {len(titles) + 1}")
     titles = titles[: len(selected)]
-    # Slightly extend end of each clip so punch lines aren't cut off at chunk boundary
+    # Align clip boundaries to full sentences, extend end for punch lines,
+    # and enforce a hard max_duration for shorts.
     video_duration_sec = max(s["end"] for s in segments) if segments else 0.0
     for chunk in selected:
-        chunk["end"] = min(chunk["end"] + clip_end_padding_sec, video_duration_sec)
+        start_sec = chunk["start"]
+        end_sec = chunk["end"]
+        # Trim start back to a sentence boundary (don't start mid-sentence)
+        i0 = None
+        for i, s in enumerate(segments):
+            if s["end"] <= start_sec:
+                continue
+            if s["start"] >= end_sec:
+                break
+            i0 = i
+            break
+        if i0 is not None and i0 > 0:
+            # Walk back to a segment that starts a sentence (previous ends with .?!)
+            while i0 > 0:
+                prev_text = (segments[i0 - 1].get("text") or "").strip().rstrip()
+                if prev_text and prev_text[-1] in ".?!…":
+                    break
+                i0 -= 1
+            start_sec = segments[i0]["start"]
+            chunk["start"] = start_sec
+        # Extend end to include trailing segments (punch line often in next phrase)
+        end_sec = chunk["end"]
+        last_idx = -1
+        for i, s in enumerate(segments):
+            if s["start"] < end_sec and s["end"] > chunk["start"]:
+                last_idx = i
+        if last_idx >= 0:
+            extra_segments = 4
+            extra_sec = 15.0
+            for j in range(last_idx + 1, min(last_idx + 1 + extra_segments, len(segments))):
+                seg_end = segments[j]["end"]
+                if seg_end - end_sec <= extra_sec:
+                    end_sec = seg_end
+                else:
+                    break
+        # First, apply padding, then enforce hard max_duration (e.g. 60s)
+        desired_end = min(end_sec + clip_end_padding_sec, video_duration_sec)
+        if desired_end - chunk["start"] > max_duration:
+            desired_end = min(chunk["start"] + max_duration, video_duration_sec)
+        chunk["end"] = desired_end
 
     # Resolve "auto" layout from first frame
     if crop_mode == "auto" and selected:

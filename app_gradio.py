@@ -360,6 +360,7 @@ def preview_final_layout(
 def generate(
     source: str,
     num_clips: int,
+    ollama_model: str,
     crop_mode: str,
     focus_region: str,
     letterbox_full_width: bool = False,
@@ -386,6 +387,7 @@ def generate(
             output_dir=output_dir,
             download_dir=download_dir,
             num_clips=num_clips,
+            ollama_model=ollama_model,
             burn_captions=True,
             crop_mode=crop_mode,
             focus_region=focus_region,
@@ -411,9 +413,10 @@ def generate(
             "shorts": [{"file": p.name, "title": title_list[i]} for i, p in enumerate(paths)],
         }
         (output_dir / "run_metadata.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+        gallery_value = [(path_strs[i], title_list[i]) for i in range(len(path_strs))]
         return (
             f"Generated {len(paths)} short(s) in generated/{run_folder}/.",
-            path_strs,
+            gallery_value,
             run_folder,
         )
     except Exception as e:
@@ -424,6 +427,7 @@ def run_ui(
     url: str,
     video_path: str | None,
     num_clips: int,
+    ollama_model: str,
     input_mode: str,
     crop_mode: str,
     focus_region: str,
@@ -485,7 +489,7 @@ def run_ui(
     else:
         manual_center = None
     return generate(
-        source, num_clips, crop_mode, focus_region, letterbox_full_width,
+        source, num_clips, ollama_model, crop_mode, focus_region, letterbox_full_width,
         use_manual_regions=use_manual_regions,
         manual_webcam_bbox=manual_webcam,
         manual_chat_bbox=manual_chat,
@@ -523,7 +527,13 @@ def build_ui() -> gr.Blocks:
 
         gr.Markdown("### 1. How many shorts?")
         num_clips = gr.Slider(1, 10, value=3, step=1, label="Number of shorts")
-
+        ollama_model = gr.Dropdown(
+            choices=["mistral", "llama3.1", "llama3.2", "llama3.3", "gemma2", "phi3"],
+            value="mistral",
+            label="AI model (Ollama)",
+            allow_custom_value=True,
+            info="Model used to pick moments and generate titles. Stronger models may give better clips.",
+        )
         gr.Markdown("### 2. Layout")
         gr.Markdown(
             "**Screen recording of a feed or event/news clip?** → Choose **Event / news**. "
@@ -777,6 +787,7 @@ def build_ui() -> gr.Blocks:
                         for _t, _ts, _ in shorts:
                             _lines.append(f"| **{_t}** | {_ts} |")
                         _initial_md = "\n".join(_lines)
+                        _initial_paths = [(path_str, title) for title, _ts, path_str in shorts]
                     else:
                         _initial_md, _initial_paths = "No shorts in this run.", []
                 else:
@@ -849,14 +860,12 @@ def build_ui() -> gr.Blocks:
                     "",
                 )
             first_folder = runs[0][1]
-            md, paths, upload_choices, upload_value, upload_title = on_history_select(
-                first_folder
-            )
+            md, paths, upload_radio_update, upload_title = on_history_select(first_folder)
             return (
                 gr.update(choices=runs, value=first_folder),
                 md,
                 paths,
-                gr.update(choices=upload_choices, value=upload_value),
+                upload_radio_update,
                 upload_title,
                 "",
                 "unlisted",
@@ -865,17 +874,18 @@ def build_ui() -> gr.Blocks:
 
         def on_history_select(folder_name):
             if not folder_name:
-                return "Select a run above.", [], [], None, ""
+                return "Select a run above.", [], gr.update(choices=[], value=None), ""
             shorts, paths = get_run_shorts(folder_name)
             if not shorts:
-                return "No shorts in this run.", [], [], None, ""
+                return "No shorts in this run.", [], gr.update(choices=[], value=None), ""
             lines = ["| Title | Generated |", "|-------|-----------|"]
             for title, ts, _ in shorts:
                 lines.append(f"| **{title}** | {ts} |")
+            gallery_value = [(path_str, title) for title, ts, path_str in shorts]
             upload_choices = [(s[0], i) for i, s in enumerate(shorts)]
             upload_value = 0
             upload_title = shorts[0][0]
-            return "\n".join(lines), paths, upload_choices, upload_value, upload_title
+            return "\n".join(lines), gallery_value, gr.update(choices=upload_choices, value=upload_value), upload_title
 
         def on_upload_short_change(folder_name, short_title):
             if folder_name is None or short_title is None:
@@ -957,7 +967,6 @@ def build_ui() -> gr.Blocks:
                 history_list_md,
                 history_gallery,
                 upload_short_dropdown,
-                upload_short_dropdown,
                 upload_title_box,
             ],
         )
@@ -979,8 +988,8 @@ def build_ui() -> gr.Blocks:
             outputs=[upload_status],
         )
 
-        def on_generate(url, vid, n, mode, crop, focus, letterbox, use_man, wl, wt, wr, wb, cl, ct, cr, cb, ml, mt, mr, mb):
-            msg, paths, run_folder = run_ui(url, vid, n, mode, crop, focus, letterbox, use_man, wl or 0, wt or 40, wr or 50, wb or 100, cl or 50, ct or 40, cr or 100, cb or 100, ml or 25, mt or 25, mr or 75, mb or 75)
+        def on_generate(url, vid, n, ollama, mode, crop, focus, letterbox, use_man, wl, wt, wr, wb, cl, ct, cr, cb, ml, mt, mr, mb):
+            msg, paths, run_folder = run_ui(url, vid, n, ollama, mode, crop, focus, letterbox, use_man, wl or 0, wt or 40, wr or 50, wb or 100, cl or 50, ct or 40, cr or 100, cb or 100, ml or 25, mt or 25, mr or 75, mb or 75)
             if run_folder is not None:
                 by_source = get_runs_by_source()
                 video_choices = [
@@ -1018,6 +1027,7 @@ def build_ui() -> gr.Blocks:
                 url_in,
                 file_in,
                 num_clips,
+                ollama_model,
                 input_mode,
                 crop_mode,
                 focus_region,
