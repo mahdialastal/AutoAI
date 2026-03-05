@@ -18,7 +18,7 @@ def run_pipeline(
     num_clips: int = 3,
     whisper_model: str = "base",
     ollama_model: str = "mistral",
-    chunk_duration: float = 30.0,
+    chunk_duration: float = 15.0,
     min_duration: float = 15.0,
     max_duration: float = 60.0,
     clip_end_padding_sec: float = 5.0,
@@ -34,12 +34,10 @@ def run_pipeline(
     manual_webcam_bbox: tuple[float, float, float, float] | None = None,
     manual_chat_bbox: tuple[float, float, float, float] | None = None,
     manual_center_bbox: tuple[float, float, float, float] | None = None,
-) -> tuple[list[Path], list[str]]:
+) -> tuple[list[Path], list[str], str, list[str]]:
     """
     Run the full pipeline: get video → transcribe → pick highlights → export shorts.
-    output_dir: where to save generated shorts.
-    download_dir: where to save downloaded videos (YouTube); if None, uses system temp.
-    Returns (paths to generated short videos, list of titles for each short).
+    Returns (paths, titles, full_transcript, list of per-short transcript text).
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -51,7 +49,7 @@ def run_pipeline(
     # 2. Transcribe
     full_text, segments = transcribe(video_path, model_size=whisper_model)
     if not segments:
-        return ([], [])
+        return ([], [], "", [])
 
     # 3. Chunk and select highlights
     chunks = segments_to_timestamped_chunks(segments, chunk_duration_sec=chunk_duration)
@@ -91,23 +89,24 @@ def run_pipeline(
                 i0 -= 1
             start_sec = segments[i0]["start"]
             chunk["start"] = start_sec
-        # Extend end to include trailing segments (punch line often in next phrase)
+        # Extend end to include trailing segments (punch line often in next phrase),
+        # but never exceed max_duration so clips keep natural length (e.g. 20–45s).
         end_sec = chunk["end"]
         last_idx = -1
         for i, s in enumerate(segments):
             if s["start"] < end_sec and s["end"] > chunk["start"]:
                 last_idx = i
+        max_end = chunk["start"] + max_duration
         if last_idx >= 0:
-            extra_segments = 4
-            extra_sec = 15.0
+            extra_segments = 2
+            extra_sec = 8.0
             for j in range(last_idx + 1, min(last_idx + 1 + extra_segments, len(segments))):
                 seg_end = segments[j]["end"]
-                if seg_end - end_sec <= extra_sec:
+                if seg_end <= max_end and seg_end - end_sec <= extra_sec:
                     end_sec = seg_end
                 else:
                     break
-        # First, apply padding, then enforce hard max_duration (e.g. 60s)
-        desired_end = min(end_sec + clip_end_padding_sec, video_duration_sec)
+        desired_end = min(end_sec + clip_end_padding_sec, video_duration_sec, max_end)
         if desired_end - chunk["start"] > max_duration:
             desired_end = min(chunk["start"] + max_duration, video_duration_sec)
         chunk["end"] = desired_end
@@ -155,6 +154,7 @@ def run_pipeline(
 
     # 4. For each selected chunk: filter segments inside [start,end], build SRT, export
     out_paths: list[Path] = []
+    short_transcripts: list[str] = []
     for i, chunk in enumerate(selected):
         start_sec = chunk["start"]
         end_sec = chunk["end"]
@@ -175,6 +175,7 @@ def run_pipeline(
         if burn_captions and clip_segments:
             srt_path = output_dir / f"clip_{i}_subtitles.srt"
             write_srt(clip_segments, srt_path, start_offset=0.0)
+        short_transcripts.append(" ".join(s["text"] for s in clip_segments).strip() if clip_segments else "")
 
         focus_x = None
         event_bbox = None
@@ -222,4 +223,4 @@ def run_pipeline(
             center_bbox=center_bbox,
         )
         out_paths.append(out_path)
-    return (out_paths, titles)
+    return (out_paths, titles, full_text, short_transcripts)

@@ -20,12 +20,12 @@ def select_highlights(
     max_duration: float = 60.0,
 ) -> list[dict]:
     """
-    Ask Ollama to pick the best num_clips chunks that would make viral shorts.
-    Returns list of chunk dicts with "start", "end", "text" (subset of chunks).
+    Ask Ollama to pick the best num_clips moments and their exact boundaries (start/end chunk index).
+    Returns list of chunk dicts with "start", "end", "text" — each clip can span 1 to several
+    micro-chunks so length matches the moment (15–60s), not always 60s.
     """
     if not chunks:
         return []
-    # Build a text representation for the LLM (enough text to judge hook and payoff)
     lines = []
     for i, c in enumerate(chunks):
         start, end = c["start"], c["end"]
@@ -36,43 +36,83 @@ def select_highlights(
         lines.append(f"[{i}] {start:.1f}s - {end:.1f}s ({dur:.0f}s): {text_preview}")
     transcript_block = "\n".join(lines)
 
-    prompt = f"""You are an expert at choosing the best moments from a long-form video to turn into short-form clips (YouTube Shorts, TikTok, Reels). Your job is to pick segments that work as STANDALONE clips: a viewer who sees only that clip should get a complete idea and a satisfying payoff.
+    prompt = f"""You are an expert at choosing the best moments from a long-form video for short-form clips (YouTube Shorts, TikTok, Reels).
 
-RULES:
-- Choose exactly {num_clips} segments. Reply with ONLY a JSON array of their indices, e.g. [2, 5, 9]. No other text, no explanation. Use 0-based indices from the list below.
-- Prefer segments that:
-  • Start with a strong hook (question, bold claim, surprise, or clear topic in the first 1–2 sentences).
-  • Contain a complete thought or story: setup and payoff (punch line, conclusion, reveal) within the same segment.
-  • Have an emotional peak, a clear "aha" moment, or a memorable quote.
-  • Are between {min_duration:.0f}s and {max_duration:.0f}s when possible.
-- Avoid segments that:
-  • Start mid-sentence or depend on something said earlier in the video.
-  • Are mostly setup with no payoff in that segment.
-  • Are filler, repetition, or long pauses.
-  • Start with weak intros like "So...", "Anyway...", "Um...", or end abruptly mid-thought.
-- Prefer variety: if picking multiple, choose different types of moments (e.g. one hook, one emotional, one surprising) rather than three similar ones.
-- Good clip: opens with a clear hook, has a payoff (punch line, reveal, conclusion) before the end. Bad clip: long wind-up, no payoff in the segment, or cuts off right before the key line.
-- Segments are built to break at sentence boundaries. Prefer ones where the text clearly starts a complete thought and ends with a conclusion or punch line (not trailing off or cut mid-sentence).
+Your job: pick exactly {num_clips} highlights. For EACH highlight you must choose a RANGE of consecutive segments (by index). The range is the exact clip: from segment start_idx through end_idx inclusive.
+
+CRITICAL RULES:
+- Reply with ONLY a JSON array of objects, each with "start_idx" and "end_idx" (integers). Example: [{{"start_idx": 0, "end_idx": 1}}, {{"start_idx": 5, "end_idx": 7}}]. No other text.
+- Each highlight must be between {min_duration:.0f} and {max_duration:.0f} seconds. Use the duration in parentheses to compute length (sum or use end - start of the range).
+- Prefer the SHORTEST range that contains the full moment: if one segment has hook + payoff, pick just that. Only span multiple segments when the moment needs it. Do NOT pad to 60s.
+- Pick moments that:
+  • Start with a strong hook (question, bold claim, surprise) and end with a payoff (punch line, conclusion, reveal).
+  • Are self-contained (viewer needs no prior context).
+- Avoid: mid-sentence starts, segments that are mostly setup with no payoff, filler, or reading long text (e.g. tweets) with no reaction.
+- Ranges must not overlap. Use 0-based indices from the list below.
 
 Transcript segments (index, time range, duration, text):
 {transcript_block}
 
-Reply with ONLY a JSON array of indices, e.g. [1, 4, 7]. Nothing else."""
+Reply with ONLY a JSON array of {num_clips} objects: [{{"start_idx": n, "end_idx": m}}, ...]. Nothing else."""
 
     response = ollama.chat(model=model, messages=[{"role": "user", "content": prompt}])
     content = (response.message.content or "").strip()
-    # Extract JSON array
-    match = re.search(r"\[[\d,\s]*\]", content)
-    if not match:
+    # Parse array of {start_idx, end_idx}
+    start_pos = content.find("[")
+    if start_pos < 0:
+        return chunks[:num_clips]
+    depth = 0
+    end_pos = -1
+    for i, ch in enumerate(content[start_pos:], start_pos):
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+        elif ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+            if depth == 0:
+                end_pos = i
+                break
+    if end_pos < 0:
         return chunks[:num_clips]
     try:
-        indices = json.loads(match.group())
+        arr = json.loads(content[start_pos : end_pos + 1])
     except json.JSONDecodeError:
         return chunks[:num_clips]
+    if not isinstance(arr, list):
+        return chunks[:num_clips]
     out = []
-    for i in indices:
-        if isinstance(i, int) and 0 <= i < len(chunks):
-            out.append(chunks[i])
+    # Fallback: if LLM returned plain indices [2, 5, 7]
+    if arr and isinstance(arr[0], int):
+        for i in arr:
+            if isinstance(i, int) and 0 <= i < len(chunks):
+                c = chunks[i]
+                out.append({"start": c["start"], "end": c["end"], "text": c["text"]})
+        return out if out else chunks[:num_clips]
+    for item in arr:
+        if not isinstance(item, dict):
+            continue
+        si = item.get("start_idx")
+        ei = item.get("end_idx")
+        if si is None or ei is None:
+            continue
+        try:
+            si, ei = int(si), int(ei)
+        except (TypeError, ValueError):
+            continue
+        if si < 0 or ei >= len(chunks) or si > ei:
+            continue
+        c0, c1 = chunks[si], chunks[ei]
+        start_sec = c0["start"]
+        end_sec = c1["end"]
+        texts = [chunks[j]["text"] for j in range(si, ei + 1)]
+        out.append({
+            "start": start_sec,
+            "end": end_sec,
+            "text": " ".join(texts).strip(),
+        })
     return out if out else chunks[:num_clips]
 
 
