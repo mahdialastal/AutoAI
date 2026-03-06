@@ -46,6 +46,19 @@ This document describes what MarkSoft AutoShorts does today and possible next st
 | Burned-in subtitles (SRT) | ✅ FFmpeg |
 | MP4, 9:16, H.264 | ✅ |
 
+### History, upload & edit
+
+| Feature | Status |
+|--------|--------|
+| Browse runs by video and run (History tab) | ✅ |
+| Play generated shorts (gallery) | ✅ |
+| Transcript (full video or per short) | ✅ |
+| Upload selected short to YouTube (OAuth) | ✅ |
+| Edit short with AI (natural-language trim) | ✅ Ollama + FFmpeg |
+| Play edited shorts (Edited tab, same as generated) | ✅ |
+
+Edit prompts supported: *Cut the last N seconds*, *Cut the first N seconds*, *Keep the first N seconds*, etc. Output: `short_N_edited.mp4` in the run folder.
+
 ---
 
 ## Possible next steps

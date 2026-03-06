@@ -12,6 +12,7 @@ MarkSoft AutoShorts turns long videos into shorts using **only local tools**: tr
 | **Cut, crop, resize, trim** | **FFmpeg** | All editing: trim segments, 9:16 crop, resize, merge |
 | **Smart vertical reframing** | **MediaPipe** (optional) | Face/speaker tracking for follow-the-speaker crop |
 | **Burned-in captions** | **FFmpeg** + **Whisper** | SRT from Whisper → FFmpeg `-vf subtitles` |
+| **Edit short (trim)** | **Ollama** + **FFmpeg** | Natural-language prompt → trim start/end → FFmpeg `-ss` / `-t` |
 | **Podcast / long-form transcript** | **Whisper** / **faster-whisper** | Same as above; export transcript only if needed |
 
 ## Required tools (install once)

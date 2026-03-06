@@ -26,8 +26,44 @@ if str(APP_ROOT) not in sys.path:
 from src.autoshorts.pipeline import run_pipeline
 from src.autoshorts.download import get_video_path, get_video_title
 from src.autoshorts.youtube_upload import upload_video_to_youtube
+from src.autoshorts.edit_short import edit_short_with_prompt
 
 PRESETS_FILE = APP_ROOT / "crop_presets.json"
+
+
+def _normalize_uploaded_video_path(video_path) -> str | None:
+    """
+    Extract a single file path from Gradio Video component value.
+    Handles: None, str, Path, tuple (path, subtitle?), dict with "path".
+    Returns None if no valid path.
+    """
+    if video_path is None:
+        return None
+    if isinstance(video_path, (list, tuple)) and video_path:
+        video_path = video_path[0]
+    if isinstance(video_path, dict):
+        video_path = video_path.get("path")
+    if hasattr(video_path, "__fspath__"):
+        video_path = os.fspath(video_path)
+    path_str = str(video_path).strip() if video_path else ""
+    if path_str and os.path.isfile(path_str):
+        return path_str
+    return None
+
+
+def _stable_upload_path(local_path: str) -> str:
+    """Copy an uploaded (temp) file to downloads/ with a stable name so it persists."""
+    import shutil
+    dest_dir = APP_ROOT / "downloads"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    stem = Path(local_path).stem
+    ext = Path(local_path).suffix or ".mp4"
+    if not ext.lower().startswith("."):
+        ext = "." + ext
+    stable_name = f"upload_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{stem[:20]}{ext}"
+    dest = dest_dir / stable_name
+    shutil.copy2(local_path, dest)
+    return str(dest.resolve())
 
 
 def _presets_data():
@@ -200,6 +236,35 @@ def get_run_shorts(folder_name):
     return shorts, paths_only, full_transcript
 
 
+def get_run_edited_shorts(folder_name):
+    """
+    Return (list of (title, run_timestamp, path_str), list of path_str for gallery)
+    for edited shorts (short_*_edited.mp4) in the run folder.
+    """
+    if not folder_name:
+        return [], []
+    run_dir = GENERATED_DIR / folder_name
+    if not run_dir.exists() or not run_dir.is_dir():
+        return [], []
+    run_timestamp = folder_name.replace("_", " ", 1)
+    meta_path = run_dir / "run_metadata.json"
+    if meta_path.exists():
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            run_timestamp = meta.get("run_timestamp", run_timestamp)
+        except Exception:
+            pass
+    edited = []
+    for f in sorted(run_dir.glob("short_*_edited.mp4")):
+        # short_1_edited.mp4 -> "Short 1 (edited)"
+        num = f.stem.replace("short_", "").replace("_edited", "")
+        title = f"Short {num} (edited)" if num.isdigit() else f"{f.stem} (edited)"
+        path_str = str(f.resolve())
+        edited.append((title, run_timestamp, path_str))
+    paths_only = [p for _, _, p in edited]
+    return edited, paths_only
+
+
 def _get_transcript_for_selection(folder_name: str | None, choice_index: int) -> str:
     """Return transcript text for the given run and selection: 0 = full video, 1+ = short index."""
     if not folder_name:
@@ -236,10 +301,8 @@ def preview_manual_regions(
     if input_mode == "YouTube URL":
         src = (url or "").strip()
     else:
-        if video_path is None:
-            return None
-        src = (video_path.get("path") if isinstance(video_path, dict) else video_path) or ""
-        src = str(src).strip() if src else ""
+        raw = _normalize_uploaded_video_path(video_path)
+        src = raw or ""
     if not src or not src.strip():
         return None
     src = src.strip()
@@ -330,10 +393,8 @@ def preview_final_layout(
     if input_mode == "YouTube URL":
         src = (url or "").strip()
     else:
-        if video_path is None:
-            return None
-        src = (video_path.get("path") if isinstance(video_path, dict) else video_path) or ""
-        src = str(src).strip() if src else ""
+        raw = _normalize_uploaded_video_path(video_path)
+        src = raw or ""
     if not src:
         return None
     try:
@@ -388,7 +449,7 @@ def generate(
 ) -> tuple[str, list[str]]:
     """Returns (status_message, list of video paths for gallery)."""
     if not source or not source.strip():
-        return "Enter a YouTube URL or provide a video file path.", [], None
+        return "Enter a video URL (YouTube, Twitch, Kick, etc.) or provide a video file path.", [], None
     source = source.strip()
     if not source.startswith(("http://", "https://")) and not os.path.isfile(source):
         return "Not a valid URL or existing file path.", [], None
@@ -471,12 +532,14 @@ def run_ui(
     if input_mode == "YouTube URL":
         source = url or ""
     else:
-        if video_path is None:
-            source = ""
-        elif isinstance(video_path, dict) and "path" in video_path:
-            source = video_path["path"] or ""
-        else:
-            source = str(video_path)
+        raw = _normalize_uploaded_video_path(video_path)
+        if not raw:
+            return "Upload a video file, then click Generate.", [], None
+        try:
+            source = _stable_upload_path(raw)
+        except Exception:
+            source = raw
+    source = (source or "").strip()
     if not source:
         return "Paste a URL or upload a video, then click Generate.", [], None
     manual_webcam = None
@@ -524,13 +587,13 @@ def build_ui() -> gr.Blocks:
 
         with gr.Row():
             input_mode = gr.Radio(
-                choices=["YouTube URL", "Upload video"],
+                choices=[("Video URL (YouTube, Twitch, Kick)", "YouTube URL"), ("Upload video", "Upload video")],
                 value="YouTube URL",
                 label="Input",
             )
         url_in = gr.Textbox(
-            label="YouTube URL",
-            placeholder="https://youtube.com/watch?v=...",
+            label="Video URL",
+            placeholder="https://youtube.com/watch?v=... | twitch.tv/videos/... | kick.com/...",
         )
         file_in = gr.Video(label="Upload video", visible=False)
 
@@ -804,6 +867,17 @@ def build_ui() -> gr.Blocks:
                     _transcript_choices = [("Full video", 0)]
                     _transcript_value = 0
                     _initial_transcript = ""
+                # Edited shorts for this run (for Edited tab)
+                _edited_shorts, _edited_paths = get_run_edited_shorts(first_run_folder) if first_run_folder else ([], [])
+                if _edited_shorts:
+                    _edited_lines = ["| Title | Run |", "|-------|-----|"]
+                    for _et, _ets, _ in _edited_shorts:
+                        _edited_lines.append(f"| **{_et}** | {_ets} |")
+                    _initial_edited_md = "\n".join(_edited_lines)
+                    _initial_edited_gallery = [(path_str, title) for title, _ts, path_str in _edited_shorts]
+                else:
+                    _initial_edited_md = "No edited shorts in this run. Use **Edit short** above to trim a short."
+                    _initial_edited_gallery = []
                 history_list_md = gr.Markdown(
                     value=_initial_md,
                     label="Shorts in this run",
@@ -827,11 +901,6 @@ def build_ui() -> gr.Blocks:
                     height="auto",
                     value=_initial_paths,
                 )
-                with gr.Accordion("Transcripts", open=True):
-                    history_transcript_md = gr.Markdown(
-                        value=_initial_transcript,
-                        label="Full video & short transcripts",
-                    )
 
                 # YouTube upload:
                 _upload_choices = [(s[0], i) for i, s in enumerate(shorts)] if first_run_folder and shorts else []
@@ -858,6 +927,34 @@ def build_ui() -> gr.Blocks:
                 upload_status = gr.Markdown(value="")
                 upload_btn = gr.Button("Upload selected short to YouTube")
 
+                with gr.Accordion("Edit short", open=False):
+                    edit_short_dropdown = gr.Radio(
+                        label="Short to edit",
+                        choices=_upload_choices if first_run_folder and shorts else [],
+                        value=0 if first_run_folder and shorts else None,
+                    )
+                    edit_prompt_textbox = gr.Textbox(
+                        label="Edit prompt",
+                        placeholder="e.g. Cut the last 3 seconds. Keep the first 22 seconds. Cut the first 2 seconds.",
+                        lines=2,
+                    )
+                    edit_btn = gr.Button("Apply edit", variant="secondary")
+                    edit_status = gr.Markdown(value="")
+
+            with gr.TabItem("Edited"):
+                gr.Markdown("Edited shorts for the run selected in the **History** tab. Use **Edit short** in History to trim a short; the result appears here.")
+                edited_list_md = gr.Markdown(
+                    value=_initial_edited_md,
+                    label="Edited shorts in this run",
+                )
+                edited_gallery = gr.Gallery(
+                    label="Play edited shorts",
+                    columns=1,
+                    object_fit="contain",
+                    height="auto",
+                    value=_initial_edited_gallery,
+                )
+
         def on_history_video_select(source_key):
             if not source_key:
                 return (
@@ -871,6 +968,9 @@ def build_ui() -> gr.Blocks:
                     "",
                     gr.update(choices=[("Full video", 0)], value=0),
                     "",
+                    gr.update(choices=[], value=None),
+                    "No edited shorts in this run.",
+                    [],
                 )
             by_source = get_runs_by_source()
             runs = []
@@ -890,9 +990,12 @@ def build_ui() -> gr.Blocks:
                     "",
                     gr.update(choices=[("Full video", 0)], value=0),
                     "",
+                    gr.update(choices=[], value=None),
+                    "No edited shorts in this run.",
+                    [],
                 )
             first_folder = runs[0][1]
-            md, paths, upload_radio_update, upload_title, transcript_dd_update, transcript_content = on_history_select(first_folder)
+            md, paths, upload_radio_update, upload_title, transcript_dd_update, transcript_content, edit_dd_update, edited_md, edited_gallery_value = on_history_select(first_folder)
             return (
                 gr.update(choices=runs, value=first_folder),
                 md,
@@ -904,14 +1007,17 @@ def build_ui() -> gr.Blocks:
                 "",
                 transcript_dd_update,
                 transcript_content,
+                edit_dd_update,
+                edited_md,
+                edited_gallery_value,
             )
 
         def on_history_select(folder_name):
             if not folder_name:
-                return "Select a run above.", [], gr.update(choices=[], value=None), "", gr.update(choices=[("Full video", 0)], value=0), ""
+                return "Select a run above.", [], gr.update(choices=[], value=None), "", gr.update(choices=[("Full video", 0)], value=0), "", gr.update(choices=[], value=None), "No edited shorts in this run.", []
             shorts, paths, full_transcript = get_run_shorts(folder_name)
             if not shorts:
-                return "No shorts in this run.", [], gr.update(choices=[], value=None), "", gr.update(choices=[("Full video", 0)], value=0), ""
+                return "No shorts in this run.", [], gr.update(choices=[], value=None), "", gr.update(choices=[("Full video", 0)], value=0), "", gr.update(choices=[], value=None), "No edited shorts in this run.", []
             lines = ["| Title | Generated | Transcript |", "|-------|-----------|------------|"]
             for title, ts, _path, _ in shorts:
                 lines.append(f"| **{title}** | {ts} | *view below* |")
@@ -921,7 +1027,18 @@ def build_ui() -> gr.Blocks:
             upload_title = shorts[0][0]
             transcript_choices = [("Full video", 0)] + [(f"Short {i+1}: {t}", i + 1) for i, (t, _, _, _) in enumerate(shorts)]
             transcript_content = _get_transcript_for_selection(folder_name, 0)
-            return "\n".join(lines), gallery_value, gr.update(choices=upload_choices, value=upload_value), upload_title, gr.update(choices=transcript_choices, value=0), transcript_content
+            edit_choices = upload_choices
+            edited_shorts, edited_paths = get_run_edited_shorts(folder_name)
+            if edited_shorts:
+                edited_lines = ["| Title | Run |", "|-------|-----|"]
+                for et, ets, _ in edited_shorts:
+                    edited_lines.append(f"| **{et}** | {ets} |")
+                edited_md = "\n".join(edited_lines)
+                edited_gallery_value = [(path_str, title) for title, _ts, path_str in edited_shorts]
+            else:
+                edited_md = "No edited shorts in this run. Use **Edit short** in History to trim a short."
+                edited_gallery_value = []
+            return "\n".join(lines), gallery_value, gr.update(choices=upload_choices, value=upload_value), upload_title, gr.update(choices=transcript_choices, value=0), transcript_content, gr.update(choices=edit_choices, value=0), edited_md, edited_gallery_value
 
         def on_upload_short_change(folder_name, short_title):
             if folder_name is None or short_title is None:
@@ -945,6 +1062,40 @@ def build_ui() -> gr.Blocks:
             title, ts, _, _ = shorts[idx]
             desc = f"Clip from longer video, generated at {ts}."
             return title, desc
+
+        def on_edit_click(folder_name, short_choice, prompt):
+            if not folder_name:
+                return "Select a run above.", gr.update(), gr.update()
+            if short_choice is None:
+                return "Select a short to edit.", gr.update(), gr.update()
+            if not (prompt or "").strip():
+                return "Enter an edit prompt (e.g. Cut the last 3 seconds, Keep the first 22 seconds).", gr.update(), gr.update()
+            if isinstance(short_choice, (list, tuple)):
+                short_choice = short_choice[-1] if len(short_choice) >= 2 and isinstance(short_choice[-1], int) else (short_choice[0] if short_choice else None)
+            shorts, _, _ = get_run_shorts(folder_name)
+            if not shorts:
+                return "No shorts in this run.", gr.update(), gr.update()
+            idx = short_choice if isinstance(short_choice, int) and 0 <= short_choice < len(shorts) else next((i for i, s in enumerate(shorts) if s[0] == short_choice), None)
+            if idx is None:
+                return "Select a valid short to edit.", gr.update(), gr.update()
+            _, _, path_str, transcript = shorts[idx]
+            video_path = Path(path_str)
+            output_path = GENERATED_DIR / folder_name / f"short_{idx + 1}_edited.mp4"
+            try:
+                ok, msg = edit_short_with_prompt(video_path, output_path, prompt.strip(), transcript=transcript or "", model="mistral")
+                if not ok:
+                    return f"**Error:** {msg}", gr.update(), gr.update()
+                edited_shorts, _ = get_run_edited_shorts(folder_name)
+                if edited_shorts:
+                    edited_lines = ["| Title | Run |", "|-------|-----|"]
+                    for et, ets, _ in edited_shorts:
+                        edited_lines.append(f"| **{et}** | {ets} |")
+                    edited_md = "\n".join(edited_lines)
+                    edited_gallery_value = [(path_str, title) for title, _ts, path_str in edited_shorts]
+                    return f"**{msg}** Switch to the **Edited** tab to play it.", edited_md, edited_gallery_value
+                return f"**{msg}**", gr.update(), gr.update()
+            except Exception as e:
+                return f"**Error:** {e}", gr.update(), gr.update()
 
         def on_transcript_select(folder_name, choice_value):
             if folder_name is None:
@@ -1007,6 +1158,9 @@ def build_ui() -> gr.Blocks:
                 upload_status,
                 transcript_dropdown,
                 history_transcript_md,
+                edit_short_dropdown,
+                edited_list_md,
+                edited_gallery,
             ],
         )
         history_run_dropdown.change(
@@ -1019,6 +1173,9 @@ def build_ui() -> gr.Blocks:
                 upload_title_box,
                 transcript_dropdown,
                 history_transcript_md,
+                edit_short_dropdown,
+                edited_list_md,
+                edited_gallery,
             ],
         )
         transcript_dropdown.change(
@@ -1043,6 +1200,11 @@ def build_ui() -> gr.Blocks:
             ],
             outputs=[upload_status],
         )
+        edit_btn.click(
+            on_edit_click,
+            inputs=[history_run_dropdown, edit_short_dropdown, edit_prompt_textbox],
+            outputs=[edit_status, edited_list_md, edited_gallery],
+        )
 
         def on_generate(url, vid, n, ollama, mode, crop, focus, letterbox, use_man, wl, wt, wr, wb, cl, ct, cr, cb, ml, mt, mr, mb):
             msg, paths, run_folder = run_ui(url, vid, n, ollama, mode, crop, focus, letterbox, use_man, wl or 0, wt or 40, wr or 50, wb or 100, cl or 50, ct or 40, cr or 100, cb or 100, ml or 25, mt or 25, mr or 75, mb or 75)
@@ -1066,7 +1228,7 @@ def build_ui() -> gr.Blocks:
                     if sk == source_key:
                         run_choices = [(ts, fn) for fn, ts in run_list]
                         break
-                md, history_paths, _r, _t, transcript_dd_update, transcript_content = on_history_select(run_folder)
+                md, history_paths, _r, _t, transcript_dd_update, transcript_content, edit_dd_update, edited_md, edited_gallery_value = on_history_select(run_folder)
                 return (
                     msg,
                     paths,
@@ -1076,8 +1238,11 @@ def build_ui() -> gr.Blocks:
                     history_paths,
                     transcript_dd_update,
                     transcript_content,
+                    edit_dd_update,
+                    edited_md,
+                    edited_gallery_value,
                 )
-            return msg, paths, gr.update(), gr.update(), "Select a video and run above.", [], gr.update(choices=[("Full video", 0)], value=0), ""
+            return msg, paths, gr.update(), gr.update(), "Select a video and run above.", [], gr.update(choices=[("Full video", 0)], value=0), "", gr.update(choices=[], value=None), "No edited shorts in this run.", []
 
         run_btn.click(
             fn=on_generate,
@@ -1104,7 +1269,7 @@ def build_ui() -> gr.Blocks:
                 m_right,
                 m_bottom,
             ],
-            outputs=[msg_out, gallery, history_video_dropdown, history_run_dropdown, history_list_md, history_gallery, transcript_dropdown, history_transcript_md],
+            outputs=[msg_out, gallery, history_video_dropdown, history_run_dropdown, history_list_md, history_gallery, transcript_dropdown, history_transcript_md, edit_short_dropdown, edited_list_md, edited_gallery],
         )
     return app
 

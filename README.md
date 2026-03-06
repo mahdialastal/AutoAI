@@ -2,7 +2,7 @@
 
 ![MarkSoft AutoShorts](autoshorts.png)
 
-Turn long videos or YouTube links into short clips (Shorts / Reels / TikTok) using **only local tools**: no cloud APIs, no sign-up. All processing runs on your machine.
+Turn long videos, **YouTube**, **Twitch**, **Kick**, or your own files into short clips (Shorts / Reels / TikTok) using **only local tools**: no cloud APIs, no sign-up. All processing runs on your machine.
 
 ---
 
@@ -12,7 +12,7 @@ Turn long videos or YouTube links into short clips (Shorts / Reels / TikTok) usi
 - **Finds viral moments** with a local LLM via [Ollama](https://ollama.ai)
 - **Cuts, crops to 9:16, and burns captions** with [FFmpeg](https://ffmpeg.org)
 - **Smart reframe:** face tracking ([MediaPipe](https://mediapipe.dev)), multiple layouts (streaming webcam+chat, split screen, speaker center, event/news), manual crop regions with preview and presets
-- **Optional:** use a YouTube URL (downloads with [yt-dlp](https://github.com/yt-dlp/yt-dlp))
+- **Optional:** use a **YouTube**, **Twitch**, or **Kick** URL (downloads with [yt-dlp](https://github.com/yt-dlp/yt-dlp)); or **upload a video** from your machine (file is copied to `downloads/` for the run).
 
 ---
 
@@ -95,8 +95,8 @@ Open the URL shown (e.g. http://127.0.0.1:7860).
 
 ### 1. Input
 
-- **YouTube URL** — Paste a link; the app downloads the video with yt-dlp (saved to `downloads/`).
-- **Upload video** — Use a local file instead. No upload to any server; the file is read from your machine.
+- **Video URL** — Paste a YouTube, Twitch, or Kick link (e.g. `https://twitch.tv/videos/...`, `https://kick.com/video/...`); the app downloads the video with yt-dlp (saved to `downloads/`).
+- **Upload video** — Use a local file. The file is copied into `downloads/` so the run is stable (Gradio temp files can be removed). No upload to any server.
 
 ### 2. Number of shorts
 
@@ -149,12 +149,31 @@ Click **Generate shorts**. The app will:
 - **Downloads:** `downloads/` (YouTube videos).
 - **Generated shorts:** `generated/YYYY-MM-DD_HH-MM-SS/` (one folder per run): `short_1.mp4`, `short_2.mp4`, … and `run_metadata.json` (titles, full transcript, per-short transcripts).
 
-### 8. History and transcripts
+### 8. History, Upload, and Edit (tabs)
+
+Under **Generated shorts** there are three tabs:
+
+| Tab | What it shows |
+|-----|----------------|
+| **This run** | Gallery of the shorts you just generated. |
+| **History** | Browse by **From video** and **Run**. Table (Title \| Generated \| Transcript), **Play shorts** gallery, **Transcript** dropdown, **Upload to YouTube** (short to upload, title, description, privacy), and **Edit short** (pick a short, enter a prompt, Apply edit). |
+| **Edited** | Same run as in History. Table and **Play edited shorts** gallery for any trimmed versions (`short_1_edited.mp4`, etc.). After you use **Edit short**, switch here to play the result. |
+
+**Edit short** uses the same AI (Ollama) to turn a natural-language prompt into trim instructions, then FFmpeg applies the trim. Examples:
+
+- *Cut the last 3 seconds* — removes the final 3 seconds.
+- *Cut the first 2 seconds* — removes the first 2 seconds.
+- *Keep the first 22 seconds* — keeps 0–22s and removes the rest (useful to shorten a short to a fixed length).
+- *Remove first 2 and last 3* — trims both ends.
+
+Edited files are saved as `short_N_edited.mp4` in the same run folder and appear in the **Edited** tab so you can play them like the generated shorts.
+
+### 9. History and transcripts
 
 - **From video / Run** — Browse past runs by source video and timestamp. The table lists each short’s title and generation time; the **Transcript** column points to the transcript viewer below.
 - **Transcript** — Open the **Transcript** accordion and use **Show transcript** to pick **Full video** or **Short 1: &lt;title&gt;** (etc.). One transcript is shown at a time in a scrollable area. Older runs without saved transcripts show a placeholder message.
 
-### 9. Optional: YouTube upload
+### 10. Optional: YouTube upload
 
 To upload a generated short to YouTube from the app, you need OAuth credentials:
 
@@ -170,7 +189,7 @@ Then use **Short to upload**, set title/description and privacy, and click **Upl
 
 | Option | Description | Default |
 |--------|-------------|--------|
-| `source` | YouTube URL or path to video file | — |
+| `source` | Video URL (YouTube, Twitch, Kick, etc.) or path to video file | — |
 | `-o`, `--output-dir` | Output folder for shorts | `./shorts_out` |
 | `-n`, `--num-clips` | Number of shorts to generate | 3 |
 | `--whisper-model` | Whisper size: tiny, base, small, medium, large-v2, large-v3 | base |
@@ -189,7 +208,7 @@ python cli.py "https://youtube.com/watch?v=VIDEO_ID" -o ./my_shorts -n 5
 
 ## Features (current)
 
-- YouTube URL + local file input  
+- Video URL (YouTube, Twitch, Kick) + local file input + upload (file copied to `downloads/`)  
 - Transcription (faster-whisper), AI highlight selection (Ollama), sentence-bound clip boundaries, payoff extension  
 - Default clip length 15–45s (configurable); start at sentence, end after punch line  
 - Layouts: Auto, Event/news, Streaming (two variants), Speaker only, Split screen  
@@ -199,6 +218,8 @@ python cli.py "https://youtube.com/watch?v=VIDEO_ID" -o ./my_shorts -n 5
 - Preview regions on a frame + preview final 9:16 layout  
 - Burned-in captions (SRT → FFmpeg)  
 - **History tab:** browse runs by video and timestamp; **Transcript** dropdown (full video or per short) in a single scrollable view  
+- **Upload to YouTube** and **Edit short** in the History tab; **Edited** tab to play trimmed shorts (same table + gallery as generated)  
+- **Edit short with AI:** natural-language trim (e.g. *Cut the last 3 seconds*, *Keep the first 22 seconds*); saves as `short_N_edited.mp4`, play in **Edited** tab  
 - Optional YouTube upload (OAuth: `youtube_client_secret.json` + `youtube_token.json`)  
 - 9:16 MP4 (H.264), 100% local
 
