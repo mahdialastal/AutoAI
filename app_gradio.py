@@ -88,10 +88,21 @@ def save_crop_preset(name, webcam, chat):
     try:
         data = _presets_data()
         data[name] = {"webcam": [float(x) for x in webcam], "chat": [float(x) for x in chat]}
-        PRESETS_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        path = PRESETS_FILE.resolve()
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        _flush_file(path)
         return None
     except Exception as e:
         return str(e)
+
+
+def _flush_file(path: Path) -> None:
+    """Ensure file is written to disk (persist across restarts)."""
+    try:
+        with open(path, "rb") as f:
+            os.fsync(f.fileno())
+    except Exception:
+        pass
 
 
 def rename_crop_preset(old_name, new_name):
@@ -105,7 +116,9 @@ def rename_crop_preset(old_name, new_name):
         if new_name != old_name and new_name in data:
             return f"A preset named '{new_name}' already exists."
         data[new_name] = data.pop(old_name)
-        PRESETS_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        path = PRESETS_FILE.resolve()
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        _flush_file(path)
         return None
     except Exception as e:
         return str(e)
@@ -116,7 +129,9 @@ def delete_crop_preset(name):
         data = _presets_data()
         if name in data:
             del data[name]
-            PRESETS_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            path = PRESETS_FILE.resolve()
+            path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            _flush_file(path)
         return None
     except Exception as e:
         return str(e)
@@ -748,23 +763,23 @@ def build_ui() -> gr.Blocks:
 
         def load_preset_into_fields(name):
             if not name:
-                return 0, 40, 50, 100, 50, 40, 100, 100
+                return 0, 40, 50, 100, 50, 40, 100, 100, ""
             p = get_crop_preset(name)
             if not p:
-                return 0, 40, 50, 100, 50, 40, 100, 100
+                return 0, 40, 50, 100, 50, 40, 100, 100, ""
             w = p.get("webcam", [0, 40, 50, 100])
             c = p.get("chat", [50, 40, 100, 100])
-            return (w[0], w[1], w[2], w[3], c[0], c[1], c[2], c[3])
+            return (w[0], w[1], w[2], w[3], c[0], c[1], c[2], c[3], name)
 
         preset_dropdown.change(
             load_preset_into_fields,
             inputs=[preset_dropdown],
-            outputs=[w_left, w_top, w_right, w_bottom, c_left, c_top, c_right, c_bottom],
+            outputs=[w_left, w_top, w_right, w_bottom, c_left, c_top, c_right, c_bottom, preset_name_in],
         )
         load_preset_btn.click(
             load_preset_into_fields,
             inputs=[preset_dropdown],
-            outputs=[w_left, w_top, w_right, w_bottom, c_left, c_top, c_right, c_bottom],
+            outputs=[w_left, w_top, w_right, w_bottom, c_left, c_top, c_right, c_bottom, preset_name_in],
         )
 
         def save_preset_fn(name, wl, wt, wr, wb, cl, ct, cr, cb):

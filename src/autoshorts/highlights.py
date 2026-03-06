@@ -113,7 +113,18 @@ Reply with ONLY a JSON array of {num_clips} objects: [{{"start_idx": n, "end_idx
             "end": end_sec,
             "text": " ".join(texts).strip(),
         })
-    return out if out else chunks[:num_clips]
+    # If LLM returned fewer than num_clips, fill with non-overlapping chunks
+    if len(out) < num_clips and len(chunks) > len(out):
+        def overlaps(a_start: float, a_end: float, b_start: float, b_end: float) -> bool:
+            return a_start < b_end and a_end > b_start
+        for i in range(len(chunks)):
+            if len(out) >= num_clips:
+                break
+            c = chunks[i]
+            if any(overlaps(c["start"], c["end"], s["start"], s["end"]) for s in out):
+                continue
+            out.append({"start": c["start"], "end": c["end"], "text": c["text"]})
+    return out[:num_clips] if out else chunks[:num_clips]
 
 
 def generate_titles_for_chunks(chunks: list[dict], model: str = "mistral") -> list[str]:

@@ -9,24 +9,51 @@ import ollama
 
 
 def get_video_duration(video_path: Path) -> float:
-    """Return duration in seconds via ffprobe (format duration, fallback stream duration)."""
-    for entry in ("format=duration", "stream=duration"):
-        try:
-            out = subprocess.run(
-                [
-                    "ffprobe", "-v", "error",
-                    "-show_entries", entry,
-                    "-of", "csv=p=0",
-                    str(video_path.resolve()),
-                ],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            if out.returncode == 0 and out.stdout.strip():
-                return float(out.stdout.strip())
-        except Exception:
-            continue
+    """Return duration in seconds via ffprobe. Prefer format (container) duration, then video stream."""
+    path_str = str(video_path.resolve())
+    # 1. Container duration (most reliable for full file length)
+    try:
+        out = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                path_str,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if out.returncode == 0 and out.stdout.strip():
+            line = out.stdout.strip().splitlines()[0].strip()
+            if line:
+                d = float(line)
+                if d > 0:
+                    return d
+    except Exception:
+        pass
+    # 2. Video stream duration (select first video stream only)
+    try:
+        out = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                path_str,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if out.returncode == 0 and out.stdout.strip():
+            line = out.stdout.strip().splitlines()[0].strip()
+            if line:
+                d = float(line)
+                if d > 0:
+                    return d
+    except Exception:
+        pass
     return 0.0
 
 
@@ -44,11 +71,11 @@ Transcript (what is said in the video): {transcript[:1500] if transcript else "(
 User instruction: {user_prompt}
 
 Reply with ONLY a JSON object with two numbers:
-- "trim_start_seconds": seconds to cut from the BEGINNING (e.g. 2 means remove first 2 seconds). Use 0 for no trim.
-- "trim_end_seconds": seconds to cut from the END (e.g. 3 means remove last 3 seconds). Use 0 for no trim.
+- "trim_start_seconds": seconds to REMOVE from the BEGINNING (e.g. 2 = remove first 2 seconds). Use 0 for no trim.
+- "trim_end_seconds": seconds to REMOVE from the END (e.g. 3 = remove the last 3 seconds). Use 0 for no trim. This is how much to cut OFF the end, not how much to keep.
 
 Examples:
-- "cut the last 3 seconds" → {{"trim_start_seconds": 0, "trim_end_seconds": 3}}
+- "cut the last 3 seconds" → {{"trim_start_seconds": 0, "trim_end_seconds": 3}}  (remove 3s from end)
 - "cut the first 2 seconds" → {{"trim_start_seconds": 2, "trim_end_seconds": 0}}
 - "remove first 2 and last 3" → {{"trim_start_seconds": 2, "trim_end_seconds": 3}}
 - "keep the first 22 seconds" → {{"trim_start_seconds": 0, "trim_end_seconds": duration - 22}} (remove everything after 22s)
@@ -105,13 +132,15 @@ def edit_short_with_prompt(
         return False, "Trim would remove the entire video; aborting."
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    # -ss before -i for fast seek (input seek); -to is relative to start of output, so -to (new_duration)
+    # Use -to (end timestamp) for accurate length; -ss before -i for fast seek
+    end_sec = duration - trim_end
     cmd = [
         "ffmpeg", "-y",
         "-ss", str(trim_start),
         "-i", str(video_path.resolve()),
-        "-t", str(new_duration),
+        "-to", str(end_sec),
         "-c", "copy",
+        "-avoid_negative_ts", "make_zero",
         str(output_path.resolve()),
     ]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
