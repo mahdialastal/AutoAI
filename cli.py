@@ -56,8 +56,8 @@ def main() -> None:
     p.add_argument(
         "--max-duration",
         type=float,
-        default=45.0,
-        help="Maximum clip length in seconds (default: 45)",
+        default=60.0,
+        help="Maximum clip length in seconds; can go longer when context needs it (default: 60)",
     )
     p.add_argument(
         "--no-captions",

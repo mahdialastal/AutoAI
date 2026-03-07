@@ -10,6 +10,142 @@ import ollama
 # How much of each chunk's text to show the LLM (need enough to see hook + payoff)
 CHUNK_TEXT_MAX_CHARS = 700
 TITLE_CHUNK_MAX_CHARS = 800
+# For segment-based selection: max segments to send (avoid token overflow), chars per segment
+SEGMENT_MAX_CHARS = 100
+SEGMENT_LIST_MAX = 400
+
+
+def select_highlights_from_segments(
+    segments: list[dict],
+    max_clips: int = 5,
+    model: str = "mistral",
+    min_duration: float = 15.0,
+    max_duration: float = 60.0,
+) -> list[dict]:
+    """
+    Ask the LLM to find ALL moments in the transcript that would make a good short.
+    Works on raw Whisper segments (fine-grained); returns 1 to max_clips clips based on content.
+    Each clip is a range of consecutive segment indices. No fixed time chunks.
+    """
+    if not segments:
+        return []
+    # Limit length for context window; show index, start, end, text (truncated)
+    use = segments[:SEGMENT_LIST_MAX]
+    lines = []
+    for i, s in enumerate(use):
+        start, end = s["start"], s["end"]
+        dur = end - start
+        text = (s.get("text") or "").strip()[:SEGMENT_MAX_CHARS]
+        if (s.get("text") or "").strip() and len((s.get("text") or "").strip()) > SEGMENT_MAX_CHARS:
+            text += "..."
+        lines.append(f"[{i}] {start:.1f}s-{end:.1f}s ({dur:.0f}s) {text}")
+    transcript_block = "\n".join(lines)
+
+    prompt = f"""You are an expert at finding viral moments in long-form video for short-form clips (YouTube Shorts, TikTok, Reels).
+
+Below is a transcript split into short segments with [index] start-end (duration) and text.
+
+TASK: Find EVERY moment that would make a good short. Each moment = a range of consecutive segments (start_idx through end_idx inclusive).
+- Return between 1 and {max_clips} moments. If the video has 5 great moments, return 5. If it only has 2, return 2. Do NOT pad with weak moments to reach {max_clips}.
+- Each moment must be between {min_duration:.0f} and {max_duration:.0f} seconds. Compute duration as (segment end_idx end time) minus (segment start_idx start time). Prefer 15–35s when the moment fits; use up to {max_duration:.0f}s when the context needs it (e.g. full story beat, extended bit).
+- Each moment must be SELF-CONTAINED: strong hook (question, bold claim, surprise) and clear payoff (punch line, conclusion, reveal). Viewer needs no prior context.
+- Prefer the SHORTEST range that contains the full moment. End at the payoff, not after.
+- Ranges must NOT overlap. Use 0-based segment indices.
+
+Reply with ONLY a JSON array of objects: [{{"start_idx": 0, "end_idx": 3}}, {{"start_idx": 8, "end_idx": 10}}, ...]
+No other text, no markdown.
+
+Transcript (index, time range, duration, text):
+{transcript_block}
+
+JSON array of 1 to {max_clips} moments (start_idx, end_idx):"""
+
+    response = ollama.chat(model=model, messages=[{"role": "user", "content": prompt}])
+    content = (response.message.content or "").strip()
+    start_pos = content.find("[")
+    if start_pos < 0:
+        return _fallback_from_segments(segments, max_clips)
+    depth = 0
+    end_pos = -1
+    for i, ch in enumerate(content[start_pos:], start_pos):
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+        elif ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+            if depth == 0:
+                end_pos = i
+                break
+    if end_pos < 0:
+        return _fallback_from_segments(segments, max_clips)
+    try:
+        arr = json.loads(content[start_pos : end_pos + 1])
+    except json.JSONDecodeError:
+        return _fallback_from_segments(segments, max_clips)
+    if not isinstance(arr, list) or not arr:
+        return _fallback_from_segments(segments, max_clips)
+    out = []
+    n = len(use)
+    for item in arr:
+        if not isinstance(item, dict):
+            continue
+        si = item.get("start_idx")
+        ei = item.get("end_idx")
+        if si is None or ei is None:
+            continue
+        try:
+            si, ei = int(si), int(ei)
+        except (TypeError, ValueError):
+            continue
+        if si < 0 or ei >= n or si > ei:
+            continue
+        s0, s1 = use[si], use[ei]
+        start_sec = s0["start"]
+        end_sec = s1["end"]
+        dur = end_sec - start_sec
+        if dur < min_duration or dur > max_duration + 10:
+            continue
+        texts = [use[j].get("text", "") for j in range(si, ei + 1)]
+        out.append({
+            "start": start_sec,
+            "end": end_sec,
+            "text": " ".join(texts).strip(),
+        })
+    if not out:
+        return _fallback_from_segments(segments, max_clips)
+    # Sort by start time and remove overlaps (keep earlier)
+    out.sort(key=lambda x: x["start"])
+    kept = []
+    for c in out:
+        if any(c["start"] < k["end"] and c["end"] > k["start"] for k in kept):
+            continue
+        kept.append(c)
+    return kept[:max_clips]
+
+
+def _fallback_from_segments(segments: list[dict], max_clips: int) -> list[dict]:
+    """Fallback: take first max_clips non-overlapping windows of ~20s from segments."""
+    if not segments or max_clips <= 0:
+        return []
+    out = []
+    video_end = max(s["end"] for s in segments)
+    step = max(20.0, (video_end - 5) / max_clips)
+    start = 5.0
+    for _ in range(max_clips):
+        if start >= video_end - 15:
+            break
+        end = min(start + 25, video_end)
+        texts = [s.get("text", "") for s in segments if s["end"] > start and s["start"] < end]
+        out.append({
+            "start": start,
+            "end": end,
+            "text": " ".join(texts).strip(),
+        })
+        start = end + 5
+    return out
 
 
 def select_highlights(
@@ -17,7 +153,7 @@ def select_highlights(
     num_clips: int = 3,
     model: str = "mistral",
     min_duration: float = 15.0,
-    max_duration: float = 45.0,
+    max_duration: float = 60.0,
 ) -> list[dict]:
     """
     Ask Ollama to pick the best num_clips moments and their exact boundaries (start/end chunk index).
@@ -42,8 +178,7 @@ Your job: pick exactly {num_clips} highlights. For EACH highlight you must choos
 
 CRITICAL RULES:
 - Reply with ONLY a JSON array of objects, each with "start_idx" and "end_idx" (integers). Example: [{{"start_idx": 0, "end_idx": 1}}, {{"start_idx": 5, "end_idx": 7}}]. No other text.
-- Each highlight must be between {min_duration:.0f} and {max_duration:.0f} seconds. Use the duration in parentheses to compute length (sum or use end - start of the range).
-- Prefer the SHORTEST range that contains the full moment: if one segment has hook + payoff, pick just that. Only span multiple segments when the moment needs it. Do NOT pad to {max_duration:.0f}s — end the range at the payoff (punch line, conclusion), not before it.
+- Each highlight must be between {min_duration:.0f} and {max_duration:.0f} seconds. Use the duration in parentheses to compute length (sum or use end - start of the range). Prefer 15–35s when possible; use up to {max_duration:.0f}s when the moment needs it. End the range at the payoff (punch line, conclusion), not before and not long after.
 - Pick moments that:
   • Start with a strong hook (question, bold claim, surprise) and end with a payoff (punch line, conclusion, reveal).
   • Are self-contained (viewer needs no prior context).

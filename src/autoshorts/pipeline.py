@@ -5,8 +5,8 @@ from pathlib import Path
 
 from .download import get_video_path
 from .export import make_short, write_srt
-from .highlights import select_highlights, generate_titles_for_chunks
-from .transcribe import segments_to_timestamped_chunks, transcribe
+from .highlights import select_highlights_from_segments, generate_titles_for_chunks
+from .transcribe import transcribe
 from .focus import estimate_focus_x, detect_webcam_chat_regions, suggest_layout
 from .event_focus import estimate_event_crop, should_use_event_fallback
 
@@ -20,7 +20,7 @@ def run_pipeline(
     ollama_model: str = "mistral",
     chunk_duration: float = 15.0,
     min_duration: float = 15.0,
-    max_duration: float = 45.0,
+    max_duration: float = 60.0,
     clip_end_padding_sec: float = 3.0,
     burn_captions: bool = True,
     smart_crop: bool = True,
@@ -51,11 +51,10 @@ def run_pipeline(
     if not segments:
         return ([], [], "", [])
 
-    # 3. Chunk and select highlights
-    chunks = segments_to_timestamped_chunks(segments, chunk_duration_sec=chunk_duration)
-    selected = select_highlights(
-        chunks,
-        num_clips=num_clips,
+    # 3. Select highlights from raw segments (dynamic count, semantic boundaries)
+    selected = select_highlights_from_segments(
+        segments,
+        max_clips=num_clips,
         model=ollama_model,
         min_duration=min_duration,
         max_duration=max_duration,
@@ -108,7 +107,7 @@ def run_pipeline(
             chunk["start"] = start_sec
 
         # Extend end to include the payoff (punch line often in next phrase).
-        # Include extra segments until we hit a sentence end or cap.
+        # Keep extension small so clips stay natural length; stop at first sentence end.
         end_sec = chunk["end"]
         last_idx = -1
         for i, s in enumerate(segments):
@@ -116,8 +115,8 @@ def run_pipeline(
                 last_idx = i
         max_end = chunk["start"] + max_duration
         if last_idx >= 0:
-            extra_segments = 5
-            extra_sec = 15.0
+            extra_segments = 2
+            extra_sec = 8.0
             for j in range(last_idx + 1, min(last_idx + 1 + extra_segments, len(segments))):
                 seg_end = segments[j]["end"]
                 if seg_end <= max_end and seg_end - end_sec <= extra_sec:

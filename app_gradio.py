@@ -454,6 +454,7 @@ def generate(
     source: str,
     num_clips: int,
     ollama_model: str,
+    max_duration_sec: float,
     crop_mode: str,
     focus_region: str,
     letterbox_full_width: bool = False,
@@ -481,6 +482,7 @@ def generate(
             download_dir=download_dir,
             num_clips=num_clips,
             ollama_model=ollama_model,
+            max_duration=float(max_duration_sec),
             burn_captions=True,
             crop_mode=crop_mode,
             focus_region=focus_region,
@@ -525,6 +527,7 @@ def run_ui(
     video_path: str | None,
     num_clips: int,
     ollama_model: str,
+    max_duration_sec: float,
     input_mode: str,
     crop_mode: str,
     focus_region: str,
@@ -588,7 +591,7 @@ def run_ui(
     else:
         manual_center = None
     return generate(
-        source, num_clips, ollama_model, crop_mode, focus_region, letterbox_full_width,
+        source, num_clips, ollama_model, max_duration_sec, crop_mode, focus_region, letterbox_full_width,
         use_manual_regions=use_manual_regions,
         manual_webcam_bbox=manual_webcam,
         manual_chat_bbox=manual_chat,
@@ -620,7 +623,7 @@ def build_ui() -> gr.Blocks:
         input_mode.change(toggle_input, input_mode, [url_in, file_in])
 
         gr.Markdown("### 1. How many shorts?")
-        num_clips = gr.Slider(1, 10, value=3, step=1, label="Number of shorts")
+        num_clips = gr.Slider(1, 20, value=3, step=1, label="Number of shorts", info="Use more for long videos (e.g. 15–20 for 40+ min).")
         ollama_model = gr.Dropdown(
             choices=["mistral", "llama3.1", "llama3.2", "llama3.3", "gemma2", "phi3"],
             value="mistral",
@@ -628,6 +631,7 @@ def build_ui() -> gr.Blocks:
             allow_custom_value=True,
             info="Model used to pick moments and generate titles. Stronger models may give better clips.",
         )
+        max_duration_sec = gr.Slider(30, 90, value=60, step=5, label="Max short length (sec)", info="Clips can go up to this when the moment needs it (e.g. full story beat).")
         gr.Markdown("### 2. Layout")
 
         with gr.Row():
@@ -1221,8 +1225,8 @@ def build_ui() -> gr.Blocks:
             outputs=[edit_status, edited_list_md, edited_gallery],
         )
 
-        def on_generate(url, vid, n, ollama, mode, crop, focus, letterbox, use_man, wl, wt, wr, wb, cl, ct, cr, cb, ml, mt, mr, mb):
-            msg, paths, run_folder = run_ui(url, vid, n, ollama, mode, crop, focus, letterbox, use_man, wl or 0, wt or 40, wr or 50, wb or 100, cl or 50, ct or 40, cr or 100, cb or 100, ml or 25, mt or 25, mr or 75, mb or 75)
+        def on_generate(url, vid, n, ollama, max_dur, mode, crop, focus, letterbox, use_man, wl, wt, wr, wb, cl, ct, cr, cb, ml, mt, mr, mb):
+            msg, paths, run_folder = run_ui(url, vid, n, ollama, max_dur, mode, crop, focus, letterbox, use_man, wl or 0, wt or 40, wr or 50, wb or 100, cl or 50, ct or 40, cr or 100, cb or 100, ml or 25, mt or 25, mr or 75, mb or 75)
             if run_folder is not None:
                 by_source = get_runs_by_source()
                 video_choices = [
@@ -1266,6 +1270,7 @@ def build_ui() -> gr.Blocks:
                 file_in,
                 num_clips,
                 ollama_model,
+                max_duration_sec,
                 input_mode,
                 crop_mode,
                 focus_region,
