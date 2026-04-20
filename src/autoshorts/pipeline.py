@@ -2,13 +2,34 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Callable
 
 from .download import get_video_path
-from .export import make_short, write_srt
+from .export import make_short, make_short_dynamic, write_srt, _probe_fps
 from .highlights import select_highlights_from_segments, generate_titles_for_chunks
 from .transcribe import transcribe
 from .focus import estimate_focus_x, detect_webcam_chat_regions, suggest_layout
 from .event_focus import estimate_event_crop, should_use_event_fallback
+from .tracking import TrackConfig, build_track, smooth_track, resample_track, track_coverage
+
+
+ProgressCallback = Callable[[str, str, float], None]  # (stage, message, progress 0..1)
+
+
+def _noop_progress(stage: str, message: str, progress: float) -> None:
+    pass
+
+
+_SMOOTHING_PRESETS = {
+    "low":    dict(ema_alpha=0.35, max_speed=0.60, deadzone=0.02),
+    "medium": dict(ema_alpha=0.18, max_speed=0.40, deadzone=0.05),
+    "high":   dict(ema_alpha=0.08, max_speed=0.22, deadzone=0.08),
+}
+
+
+def _make_track_config(follow_mode: str, follow_smoothing: str) -> TrackConfig:
+    preset = _SMOOTHING_PRESETS.get(follow_smoothing, _SMOOTHING_PRESETS["medium"])
+    return TrackConfig(mode=follow_mode, **preset)  # type: ignore[arg-type]
 
 
 def run_pipeline(
@@ -34,6 +55,10 @@ def run_pipeline(
     manual_webcam_bbox: tuple[float, float, float, float] | None = None,
     manual_chat_bbox: tuple[float, float, float, float] | None = None,
     manual_center_bbox: tuple[float, float, float, float] | None = None,
+    follow_mode: str = "auto",
+    follow_smoothing: str = "medium",
+    follow_min_coverage: float = 0.35,
+    on_progress: ProgressCallback | None = None,
 ) -> tuple[list[Path], list[str], str, list[str]]:
     """
     Run the full pipeline: get video → transcribe → pick highlights → export shorts.
@@ -42,16 +67,21 @@ def run_pipeline(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     dld_dir = Path(download_dir) if download_dir is not None else None
+    progress = on_progress or _noop_progress
 
     # 1. Get video
+    progress("download", f"Fetching source: {source}", 0.02)
     video_path = get_video_path(source, download_dir=dld_dir)
 
     # 2. Transcribe
+    progress("transcribe", f"Transcribing with Whisper ({whisper_model})", 0.10)
     full_text, segments = transcribe(video_path, model_size=whisper_model)
     if not segments:
+        progress("done", "No speech detected — nothing to clip.", 1.0)
         return ([], [], "", [])
 
     # 3. Select highlights from raw segments (dynamic count, semantic boundaries)
+    progress("select", f"Asking {ollama_model} for the best moments (up to {num_clips})", 0.30)
     selected = select_highlights_from_segments(
         segments,
         max_clips=num_clips,
@@ -59,6 +89,7 @@ def run_pipeline(
         min_duration=min_duration,
         max_duration=max_duration,
     )
+    progress("titles", f"Writing titles for {len(selected)} clip(s)", 0.40)
     titles = generate_titles_for_chunks(selected, model=ollama_model)
     # Ensure we have one title per selected clip
     while len(titles) < len(selected):
@@ -176,7 +207,13 @@ def run_pipeline(
     # 4. For each selected chunk: filter segments inside [start,end], build SRT, export
     out_paths: list[Path] = []
     short_transcripts: list[str] = []
+    total = max(1, len(selected))
     for i, chunk in enumerate(selected):
+        progress(
+            "render",
+            f"Rendering short {i + 1}/{total}",
+            0.50 + 0.45 * (i / total),
+        )
         start_sec = chunk["start"]
         end_sec = chunk["end"]
         clip_segments = [
@@ -224,24 +261,60 @@ def run_pipeline(
                 pass
 
         out_path = output_dir / f"short_{i + 1}.mp4"
-        make_short(
-            video_path,
-            start_sec,
-            end_sec,
-            out_path,
-            srt_path=srt_path,
-            focus_x=focus_x,
-            crop_mode=export_crop_mode,
-            focus_region=focus_region,
-            letterbox_full_width=letterbox_full_width,
-            manual_top=manual_top,
-            manual_bottom=manual_bottom,
-            manual_left=manual_left,
-            manual_right=manual_right,
-            webcam_bbox=webcam_bbox,
-            chat_bbox=chat_bbox,
-            event_bbox=event_bbox,
-            center_bbox=center_bbox,
+
+        # Dynamic-follow path: for center/speaker crops, pan the 9:16 window
+        # per-frame to keep the subject in view. Only active when the crop mode
+        # is a single-window crop (no stacked layouts, no manual rectangles,
+        # no letterbox) and the tracker finds the subject reliably.
+        use_follow = (
+            smart_crop
+            and follow_mode != "off"
+            and export_crop_mode in ("center", "speaker")
+            and event_bbox is None
+            and not letterbox_full_width
+            and manual_top is None
+            and manual_left is None
         )
+        rendered = False
+        if use_follow:
+            try:
+                cfg = _make_track_config(follow_mode, follow_smoothing)
+                raw = build_track(video_path, start_sec, end_sec, cfg)
+                coverage = track_coverage(raw)
+                if coverage >= follow_min_coverage:
+                    smoothed = smooth_track(raw, cfg)
+                    src_fps = _probe_fps(video_path) or 30.0
+                    per_frame = resample_track(smoothed, src_fps, end_sec - start_sec)
+                    make_short_dynamic(
+                        video_path, start_sec, end_sec, out_path,
+                        per_frame_track=per_frame, srt_path=srt_path,
+                        fps=src_fps,
+                    )
+                    rendered = True
+            except Exception as e:
+                print(f"[follow] fallback to static crop for short_{i + 1}: {e}")
+                rendered = False
+
+        if not rendered:
+            make_short(
+                video_path,
+                start_sec,
+                end_sec,
+                out_path,
+                srt_path=srt_path,
+                focus_x=focus_x,
+                crop_mode=export_crop_mode,
+                focus_region=focus_region,
+                letterbox_full_width=letterbox_full_width,
+                manual_top=manual_top,
+                manual_bottom=manual_bottom,
+                manual_left=manual_left,
+                manual_right=manual_right,
+                webcam_bbox=webcam_bbox,
+                chat_bbox=chat_bbox,
+                event_bbox=event_bbox,
+                center_bbox=center_bbox,
+            )
         out_paths.append(out_path)
+    progress("done", f"Rendered {len(out_paths)} short(s).", 1.0)
     return (out_paths, titles, full_text, short_transcripts)

@@ -3,6 +3,10 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .tracking import TrackPoint
 
 
 def _get_video_dimensions(video_path: Path) -> tuple[int, int] | None:
@@ -312,6 +316,162 @@ def make_short(
     if result.returncode != 0:
         raise RuntimeError(
             f"FFmpeg failed (exit {result.returncode}): {result.stderr or result.stdout}"
+        )
+    return output_path
+
+
+def _probe_fps(video_path: Path) -> float | None:
+    """Return source FPS via ffprobe (average frame rate). Returns None on failure."""
+    try:
+        out = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=avg_frame_rate",
+                "-of", "csv=p=0",
+                str(video_path.resolve()),
+            ],
+            capture_output=True, text=True, timeout=10,
+        )
+        raw = (out.stdout or "").strip()
+        if "/" in raw:
+            num, den = raw.split("/", 1)
+            num_f = float(num)
+            den_f = float(den) if float(den) != 0 else 1.0
+            return num_f / den_f if num_f > 0 else None
+        if raw:
+            return float(raw)
+    except Exception:
+        pass
+    return None
+
+
+def make_short_dynamic(
+    video_path: Path,
+    start_sec: float,
+    end_sec: float,
+    output_path: Path,
+    per_frame_track: "list[TrackPoint]",
+    srt_path: Path | None = None,
+    width: int = 1080,
+    height: int = 1920,
+    fps: float | None = None,
+) -> Path:
+    """Render a 9:16 clip whose crop window follows a per-frame track.
+
+    OpenCV seeks to start_sec, crops each source frame to the aspect ratio
+    width:height using (cx, cy) from `per_frame_track` at that frame, scales
+    to width x height, and pipes BGR bytes to FFmpeg. FFmpeg muxes the
+    original audio for [start_sec, end_sec] and optionally burns `srt_path`.
+    """
+    import cv2
+    import numpy as np
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    duration = max(0.01, end_sec - start_sec)
+
+    src_fps = fps if fps and fps > 0 else (_probe_fps(video_path) or 30.0)
+
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise RuntimeError(f"OpenCV could not open {video_path}")
+    src_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    src_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    if src_w <= 0 or src_h <= 0:
+        cap.release()
+        raise RuntimeError(f"Invalid source dimensions {src_w}x{src_h}")
+
+    target_aspect = width / height
+    crop_h = src_h
+    crop_w = int(round(crop_h * target_aspect))
+    if crop_w > src_w:
+        crop_w = src_w
+        crop_h = int(round(crop_w / target_aspect))
+    crop_w = max(2, crop_w - (crop_w % 2))
+    crop_h = max(2, crop_h - (crop_h % 2))
+
+    max_x = max(0, src_w - crop_w)
+    max_y = max(0, src_h - crop_h)
+    total_frames = max(1, int(round(duration * src_fps)))
+
+    vf_parts = []
+    if srt_path and srt_path.exists():
+        vf_parts.append(f"subtitles=filename={_escape_subtitles_path(srt_path.name)}")
+    vf = ",".join(vf_parts) if vf_parts else None
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-f", "rawvideo",
+        "-pix_fmt", "bgr24",
+        "-s", f"{width}x{height}",
+        "-r", f"{src_fps:.6f}",
+        "-i", "-",
+        "-ss", str(start_sec),
+        "-t", str(duration),
+        "-i", str(video_path.resolve()),
+    ]
+    if vf:
+        cmd += ["-vf", vf]
+    cmd += [
+        "-map", "0:v", "-map", "1:a?",
+        "-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-movflags", "+faststart",
+        str(output_path.resolve()),
+    ]
+
+    cap.set(cv2.CAP_PROP_POS_MSEC, start_sec * 1000.0)
+    proc = subprocess.Popen(
+        cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE, cwd=str(output_path.parent),
+    )
+    written = 0
+    last_frame_bytes: bytes | None = None
+    try:
+        for i in range(total_frames):
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                if last_frame_bytes is None:
+                    break
+                proc.stdin.write(last_frame_bytes)
+                written += 1
+                continue
+            if i < len(per_frame_track):
+                tp = per_frame_track[i]
+                cx, cy = tp.cx, tp.cy
+            elif per_frame_track:
+                tp = per_frame_track[-1]
+                cx, cy = tp.cx, tp.cy
+            else:
+                cx, cy = 0.5, 0.5
+            px = int(round(cx * src_w - crop_w / 2.0))
+            py = int(round(cy * src_h - crop_h / 2.0))
+            px = max(0, min(max_x, px))
+            py = max(0, min(max_y, py))
+            crop = frame[py:py + crop_h, px:px + crop_w]
+            if crop.shape[1] != width or crop.shape[0] != height:
+                crop = cv2.resize(crop, (width, height), interpolation=cv2.INTER_LANCZOS4)
+            if not crop.flags["C_CONTIGUOUS"]:
+                crop = np.ascontiguousarray(crop)
+            last_frame_bytes = crop.tobytes()
+            proc.stdin.write(last_frame_bytes)
+            written += 1
+    finally:
+        cap.release()
+        try:
+            proc.stdin.close()
+        except Exception:
+            pass
+    stderr = proc.stderr.read().decode("utf-8", errors="replace") if proc.stderr else ""
+    proc.wait()
+    if proc.returncode != 0:
+        if vf and ("No such filter" in stderr or "Filter not found" in stderr or "subtitles" in stderr.lower()):
+            return make_short_dynamic(
+                video_path, start_sec, end_sec, output_path,
+                per_frame_track, srt_path=None, width=width, height=height, fps=src_fps,
+            )
+        raise RuntimeError(
+            f"FFmpeg dynamic-crop failed (exit {proc.returncode}, wrote {written}/{total_frames} frames):\n{stderr}"
         )
     return output_path
 

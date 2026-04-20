@@ -2,15 +2,28 @@
 generated/
 downloads/
 
-# YouTube OAuth (user-specific secrets)
+# OAuth client secrets + cached tokens (per-platform)
 youtube_client_secret.json
 youtube_token.json
+credentials/
+
+# Frontend build + node_modules
+web/node_modules/
+web/dist/
+web/.vite/
 
 # Python
 venv/
+.venv/
 __pycache__/
 *.pyc
 .pytest_cache/
 
+# IDE / local tooling
+.claude/
+.vscode/
+.idea/
+
 # OS
 .DS_Store
+Thumbs.db

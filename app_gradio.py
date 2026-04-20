@@ -25,7 +25,8 @@ if str(APP_ROOT) not in sys.path:
 
 from src.autoshorts.pipeline import run_pipeline
 from src.autoshorts.download import get_video_path, get_video_title
-from src.autoshorts.youtube_upload import upload_video_to_youtube
+from src.autoshorts.youtube_upload import upload_video_to_youtube  # kept for back-compat
+from src.autoshorts.publish import publish as publish_dispatch
 from src.autoshorts.edit_short import edit_short_with_prompt
 
 PRESETS_FILE = APP_ROOT / "crop_presets.json"
@@ -462,6 +463,8 @@ def generate(
     manual_webcam_bbox: tuple[float, float, float, float] | None = None,
     manual_chat_bbox: tuple[float, float, float, float] | None = None,
     manual_center_bbox: tuple[float, float, float, float] | None = None,
+    follow_mode: str = "auto",
+    follow_smoothing: str = "medium",
 ) -> tuple[str, list[str]]:
     """Returns (status_message, list of video paths for gallery)."""
     if not source or not source.strip():
@@ -494,6 +497,8 @@ def generate(
             manual_webcam_bbox=manual_webcam_bbox,
             manual_chat_bbox=manual_chat_bbox,
             manual_center_bbox=manual_center_bbox,
+            follow_mode=follow_mode,
+            follow_smoothing=follow_smoothing,
         )
         if not paths:
             return "No segments found (empty or very short transcript).", [], None
@@ -545,6 +550,8 @@ def run_ui(
     m_top: float,
     m_right: float,
     m_bottom: float,
+    follow_mode: str = "auto",
+    follow_smoothing: str = "medium",
 ) -> tuple[str, list[str]]:
     """Use URL if input_mode is 'url', else use uploaded video path."""
     if input_mode == "YouTube URL":
@@ -596,6 +603,8 @@ def run_ui(
         manual_webcam_bbox=manual_webcam,
         manual_chat_bbox=manual_chat,
         manual_center_bbox=manual_center,
+        follow_mode=follow_mode,
+        follow_smoothing=follow_smoothing,
     )
 
 
@@ -623,7 +632,7 @@ def build_ui() -> gr.Blocks:
         input_mode.change(toggle_input, input_mode, [url_in, file_in])
 
         gr.Markdown("### 1. How many shorts?")
-        num_clips = gr.Slider(1, 20, value=3, step=1, label="Number of shorts", info="Use more for long videos (e.g. 15–20 for 40+ min).")
+        num_clips = gr.Slider(1, 100, value=10, step=1, label="Max number of shorts", info="Upper cap. The AI returns only as many as it finds worth clipping — never pads to reach this. Raise high (50–100) for long VODs.")
         ollama_model = gr.Dropdown(
             choices=["mistral", "llama3.1", "llama3.2", "llama3.3", "gemma2", "phi3"],
             value="mistral",
@@ -663,7 +672,31 @@ def build_ui() -> gr.Blocks:
             info="Full width keeps the entire horizontal frame visible with black bars top/bottom. Use this if the result looks like 'only the center' and you want to see the whole scene.",
         )
 
-        gr.Markdown("### 2b. Set crop regions yourself (Streaming only)")
+        gr.Markdown("### 2b. Subject tracking (follow)")
+        with gr.Row():
+            follow_mode = gr.Dropdown(
+                [
+                    ("Auto (face, fallback to person)", "auto"),
+                    ("Face only", "face"),
+                    ("Person only (YOLO)", "person"),
+                    ("Off (static crop)", "off"),
+                ],
+                value="auto",
+                label="Follow subject",
+                info="Pans the 9:16 window to follow the subject across the clip. Only used for Speaker / Auto layouts when they resolve to a single-window crop.",
+            )
+            follow_smoothing = gr.Dropdown(
+                [
+                    ("Low (tight, snappy)", "low"),
+                    ("Medium (default)", "medium"),
+                    ("High (very smooth, more lag)", "high"),
+                ],
+                value="medium",
+                label="Smoothing",
+                info="Higher = smoother pan with more lag; Lower = snappier but may jitter.",
+            )
+
+        gr.Markdown("### 2c. Set crop regions yourself (Streaming only)")
         manual_accord = gr.Accordion(
             "I'll select the webcam and chat areas myself (no AI)",
             open=False,
@@ -921,30 +954,69 @@ def build_ui() -> gr.Blocks:
                     value=_initial_paths,
                 )
 
-                # YouTube upload:
+                # Publish to YouTube / TikTok / Facebook / Instagram:
                 _upload_choices = [(s[0], i) for i, s in enumerate(shorts)] if first_run_folder and shorts else []
                 upload_short_dropdown = gr.Radio(
-                    label="Short to upload",
+                    label="Short to publish",
                     choices=_upload_choices,
                     value=0 if first_run_folder and shorts else None,
                 )
                 upload_title_box = gr.Textbox(
-                    label="YouTube title",
+                    label="Title",
                     value=shorts[0][0] if first_run_folder and shorts else "",
                 )
                 upload_desc_box = gr.Textbox(
-                    label="YouTube description (optional)",
+                    label="Description / caption (optional)",
                     value="",
                     lines=3,
                 )
+                with gr.Row():
+                    publish_platform = gr.Dropdown(
+                        label="Platform",
+                        choices=[
+                            ("YouTube", "youtube"),
+                            ("TikTok", "tiktok"),
+                            ("Facebook Reels", "facebook"),
+                            ("Instagram Reels", "instagram"),
+                        ],
+                        value="youtube",
+                        allow_custom_value=False,
+                    )
+                    publish_mode = gr.Dropdown(
+                        label="Mode",
+                        choices=[
+                            ("API (programmatic)", "api"),
+                            ("Browser (assisted manual)", "browser"),
+                        ],
+                        value="api",
+                        allow_custom_value=False,
+                    )
                 upload_privacy = gr.Dropdown(
                     label="YouTube privacy",
                     choices=["public", "unlisted", "private"],
                     value="unlisted",
                     allow_custom_value=False,
+                    visible=True,
+                )
+                tiktok_direct_post = gr.Checkbox(
+                    label="TikTok: direct post (requires video.publish scope approval). Off = send to drafts.",
+                    value=False,
+                    visible=False,
                 )
                 upload_status = gr.Markdown(value="")
-                upload_btn = gr.Button("Upload selected short to YouTube")
+                upload_btn = gr.Button("Publish selected short")
+
+                def _toggle_platform_options(p):
+                    return (
+                        gr.update(visible=(p == "youtube")),
+                        gr.update(visible=(p == "tiktok")),
+                    )
+
+                publish_platform.change(
+                    _toggle_platform_options,
+                    inputs=[publish_platform],
+                    outputs=[upload_privacy, tiktok_direct_post],
+                )
 
                 with gr.Accordion("Edit short", open=False):
                     edit_short_dropdown = gr.Radio(
@@ -1127,17 +1199,16 @@ def build_ui() -> gr.Blocks:
                     idx = 0
             return _get_transcript_for_selection(folder_name, idx)
 
-        def on_upload_click(folder_name, short_title, title, description, privacy):
+        def on_upload_click(folder_name, short_title, title, description, privacy, platform, mode, tiktok_direct):
             if folder_name is None:
                 return "Select a run and short first."
             if short_title is None:
-                return "Select a short to upload."
-            # Gradio may send (label, value) as list or just the index (int)
+                return "Select a short to publish."
             if isinstance(short_title, (list, tuple)):
                 if len(short_title) >= 2 and isinstance(short_title[-1], int):
-                    short_title = short_title[-1]  # use index
+                    short_title = short_title[-1]
                 elif len(short_title) >= 1:
-                    short_title = short_title[0]  # use title string
+                    short_title = short_title[0]
             shorts, _, _ = get_run_shorts(folder_name)
             if not shorts:
                 return "No shorts in this run."
@@ -1147,21 +1218,29 @@ def build_ui() -> gr.Blocks:
             else:
                 idx = next((i for i, s in enumerate(shorts) if s[0] == short_title), None)
             if idx is None:
-                return "Select a valid short to upload."
+                return "Select a valid short to publish."
             _, _, path_str, _ = shorts[idx]
             video_path = Path(path_str)
+            platform = platform or "youtube"
+            mode = mode or "api"
+            opts: dict = {}
+            if platform == "youtube":
+                opts["privacy_status"] = privacy or "unlisted"
+            if platform == "tiktok":
+                opts["direct_post"] = bool(tiktok_direct)
             try:
-                url = upload_video_to_youtube(
-                    video_path,
+                result = publish_dispatch(
+                    platform=platform, mode=mode,
+                    video_path=video_path,
                     title=title or video_path.stem,
                     description=description or "",
-                    privacy_status=privacy or "unlisted",
-                    client_secrets_file=APP_ROOT / "youtube_client_secret.json",
-                    token_file=APP_ROOT / "youtube_token.json",
+                    **opts,
                 )
-                return f"**Uploaded!** [Open on YouTube]({url})"
             except Exception as e:
-                return f"Upload failed: `{e}`"
+                return f"Publish failed on {platform} ({mode}): `{e}`"
+            if result.url:
+                return f"**{result.message or 'Done.'}** [Open]({result.url})"
+            return f"**{result.message or 'Done.'}**"
 
         history_video_dropdown.change(
             on_history_video_select,
@@ -1216,6 +1295,9 @@ def build_ui() -> gr.Blocks:
                 upload_title_box,
                 upload_desc_box,
                 upload_privacy,
+                publish_platform,
+                publish_mode,
+                tiktok_direct_post,
             ],
             outputs=[upload_status],
         )
@@ -1225,8 +1307,14 @@ def build_ui() -> gr.Blocks:
             outputs=[edit_status, edited_list_md, edited_gallery],
         )
 
-        def on_generate(url, vid, n, ollama, max_dur, mode, crop, focus, letterbox, use_man, wl, wt, wr, wb, cl, ct, cr, cb, ml, mt, mr, mb):
-            msg, paths, run_folder = run_ui(url, vid, n, ollama, max_dur, mode, crop, focus, letterbox, use_man, wl or 0, wt or 40, wr or 50, wb or 100, cl or 50, ct or 40, cr or 100, cb or 100, ml or 25, mt or 25, mr or 75, mb or 75)
+        def on_generate(url, vid, n, ollama, max_dur, mode, crop, focus, letterbox, use_man, wl, wt, wr, wb, cl, ct, cr, cb, ml, mt, mr, mb, follow, smoothing):
+            msg, paths, run_folder = run_ui(
+                url, vid, n, ollama, max_dur, mode, crop, focus, letterbox, use_man,
+                wl or 0, wt or 40, wr or 50, wb or 100,
+                cl or 50, ct or 40, cr or 100, cb or 100,
+                ml or 25, mt or 25, mr or 75, mb or 75,
+                follow or "auto", smoothing or "medium",
+            )
             if run_folder is not None:
                 by_source = get_runs_by_source()
                 video_choices = [
@@ -1288,6 +1376,8 @@ def build_ui() -> gr.Blocks:
                 m_top,
                 m_right,
                 m_bottom,
+                follow_mode,
+                follow_smoothing,
             ],
             outputs=[msg_out, gallery, history_video_dropdown, history_run_dropdown, history_list_md, history_gallery, transcript_dropdown, history_transcript_md, edit_short_dropdown, edited_list_md, edited_gallery],
         )

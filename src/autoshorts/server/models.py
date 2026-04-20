@@ -1,0 +1,86 @@
+"""Pydantic models for API request/response bodies."""
+from __future__ import annotations
+
+from typing import Literal
+
+from pydantic import BaseModel, Field
+
+
+class StartRunRequest(BaseModel):
+    source: str = Field(..., description="URL or absolute local file path to the source video.")
+    num_clips: int = Field(10, ge=1, le=100)
+    ollama_model: str = "mistral"
+    whisper_model: str = "base"
+    min_duration: float = 15.0
+    max_duration: float = 60.0
+    burn_captions: bool = True
+    smart_crop: bool = True
+    crop_mode: str = "auto"
+    focus_region: Literal["full", "center"] = "full"
+    letterbox_full_width: bool = False
+    follow_mode: Literal["auto", "face", "person", "off"] = "auto"
+    follow_smoothing: Literal["low", "medium", "high"] = "medium"
+    # Manual bbox overrides (optional; each is (left, top, right, bottom) 0..1)
+    manual_webcam_bbox: tuple[float, float, float, float] | None = None
+    manual_chat_bbox: tuple[float, float, float, float] | None = None
+    manual_center_bbox: tuple[float, float, float, float] | None = None
+
+
+class JobSummary(BaseModel):
+    id: str
+    run_folder: str
+    source: str
+    status: str
+    created_at: float
+    started_at: float | None
+    finished_at: float | None
+    error: str | None = None
+    last_stage: str | None = None
+    last_message: str | None = None
+    progress: float = 0.0
+
+
+class ShortInfo(BaseModel):
+    file: str
+    title: str
+    transcript: str = ""
+    url: str                 # API path to stream the video
+
+
+class RunDetail(BaseModel):
+    run_folder: str
+    source: str
+    source_label: str = ""
+    full_transcript: str = ""
+    shorts: list[ShortInfo]
+
+
+class PublishRequest(BaseModel):
+    run_folder: str
+    file: str
+    title: str
+    description: str = ""
+    platform: Literal["youtube", "tiktok", "facebook", "instagram"]
+    mode: Literal["api", "browser"] = "api"
+    privacy_status: str | None = None    # YouTube: public/unlisted/private
+    tiktok_direct_post: bool = False
+
+
+class PublishResponse(BaseModel):
+    platform: str
+    mode: str
+    ok: bool
+    url: str | None = None
+    remote_id: str | None = None
+    message: str = ""
+
+
+class PresetSummary(BaseModel):
+    names: list[str]
+
+
+class SavePresetRequest(BaseModel):
+    name: str
+    webcam: tuple[float, float, float, float]
+    chat: tuple[float, float, float, float]
+    center: tuple[float, float, float, float]

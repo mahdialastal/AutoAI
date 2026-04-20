@@ -12,7 +12,7 @@ CHUNK_TEXT_MAX_CHARS = 700
 TITLE_CHUNK_MAX_CHARS = 800
 # For segment-based selection: max segments to send (avoid token overflow), chars per segment
 SEGMENT_MAX_CHARS = 100
-SEGMENT_LIST_MAX = 400
+SEGMENT_LIST_MAX = 1200
 
 
 def select_highlights_from_segments(
