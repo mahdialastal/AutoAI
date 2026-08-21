@@ -24,8 +24,8 @@ class StartRunRequest(BaseModel):
     follow_mode: Literal["auto", "face", "person", "off"] = "auto"
     follow_smoothing: Literal["low", "medium", "high"] = "medium"
 
-    # Manual bbox overrides
-    # Each bbox is (left, top, right, bottom) using values from 0.0 to 1.0
+    # Manual bbox overrides (optional)
+    # Format: (left, top, right, bottom), values from 0.0 to 1.0
     manual_webcam_bbox: tuple[float, float, float, float] | None = None
     manual_chat_bbox: tuple[float, float, float, float] | None = None
     manual_center_bbox: tuple[float, float, float, float] | None = None
@@ -33,13 +33,10 @@ class StartRunRequest(BaseModel):
 
 class RenderRequest(BaseModel):
     """
-    Lightweight render request.
+    Lightweight render request intended for n8n.
 
-    This endpoint is intended to be controlled by n8n.
-    It skips Whisper, Ollama, and automatic clip selection.
-
-    n8n provides the exact start/end timestamps and the video engine
-    only downloads, crops, reframes, and renders the selected segment.
+    This skips Whisper, Ollama, and automatic clip selection.
+    n8n will provide the exact start/end timestamps.
     """
 
     source: str = Field(
@@ -50,13 +47,13 @@ class RenderRequest(BaseModel):
     start: float = Field(
         ...,
         ge=0,
-        description="Start time of the clip in seconds."
+        description="Clip start time in seconds."
     )
 
     end: float = Field(
         ...,
         gt=0,
-        description="End time of the clip in seconds."
+        description="Clip end time in seconds."
     )
 
     smart_crop: bool = True
@@ -119,7 +116,10 @@ class PublishRequest(BaseModel):
         "instagram"
     ]
 
-    mode: Literal["api", "browser"] = "api"
+    mode: Literal[
+        "api",
+        "browser"
+    ] = "api"
 
     # YouTube: public / unlisted / private
     privacy_status: str | None = None
