@@ -6,9 +6,13 @@ RUN apt-get update && apt-get install -y \
     ffmpeg \
     curl \
     wget \
+    unzip \
     libglib2.0-0 \
     libgl1 \
     && rm -rf /var/lib/apt/lists/*
+
+# Install Deno for yt-dlp YouTube JavaScript challenges
+RUN curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh
 
 COPY requirements.txt .
 
