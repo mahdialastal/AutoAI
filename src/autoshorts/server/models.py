@@ -36,7 +36,8 @@ class RenderRequest(BaseModel):
     Lightweight render request intended for n8n.
 
     This skips Whisper, Ollama, and automatic clip selection.
-    n8n will provide the exact start/end timestamps.
+    n8n provides the exact start/end timestamps and the video engine
+    only downloads, crops, reframes, and renders the selected segment.
     """
 
     source: str = Field(
@@ -69,7 +70,10 @@ class RenderRequest(BaseModel):
         "webcam_chat_stack_bottom"
     ] = "center"
 
-    focus_region: Literal["full", "center"] = "full"
+    focus_region: Literal[
+        "full",
+        "center"
+    ] = "full"
 
     letterbox_full_width: bool = False
 
