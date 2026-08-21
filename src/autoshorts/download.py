@@ -22,7 +22,7 @@ def _get_cookies_file() -> str | None:
 def get_video_title(source: str) -> str | None:
     """
     For YouTube (or other) URLs, return the video title without downloading.
-    For local paths, return None (caller can use filename).
+    For local paths, return None.
     """
     source = (source or "").strip()
 
@@ -34,6 +34,7 @@ def get_video_title(source: str) -> str | None:
             "quiet": True,
             "no_warnings": True,
             "extract_flat": False,
+            "remote_components": {"ejs:github"},
         }
 
         cookies_file = _get_cookies_file()
@@ -54,7 +55,7 @@ def get_video_path(
 ) -> Path:
     """
     If source is a URL, download with yt-dlp and return path to video.
-    If source is a local path, return it as-is (if file exists).
+    If source is a local path, return it as-is if it exists.
 
     download_dir:
         If set, save downloads here.
@@ -83,20 +84,30 @@ def get_video_path(
         "outtmpl": out_tpl,
         "merge_output_format": "mp4",
         "quiet": False,
+
+        # Enable yt-dlp JavaScript challenge solver components.
+        # Deno is already installed in the Docker image.
+        "remote_components": {"ejs:github"},
     }
 
     cookies_file = _get_cookies_file()
+
     if cookies_file:
         opts["cookiefile"] = cookies_file
 
     with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(source, download=True)
+        info = ydl.extract_info(
+            source,
+            download=True,
+        )
 
         path = ydl.prepare_filename(info)
 
         if path and os.path.isfile(path):
             return Path(path)
 
+        # yt-dlp may merge video/audio into a final MP4 whose
+        # filename differs from prepare_filename().
         candidates = list(
             out_dir.glob(
                 f"{info.get('id', 'unknown')}*.mp4"
