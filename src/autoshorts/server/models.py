@@ -7,7 +7,10 @@ from pydantic import BaseModel, Field
 
 
 class StartRunRequest(BaseModel):
-    source: str = Field(..., description="URL or absolute local file path to the source video.")
+    source: str = Field(
+        ...,
+        description="URL or absolute local file path to the source video."
+    )
     num_clips: int = Field(10, ge=1, le=100)
     ollama_model: str = "mistral"
     whisper_model: str = "base"
@@ -20,10 +23,58 @@ class StartRunRequest(BaseModel):
     letterbox_full_width: bool = False
     follow_mode: Literal["auto", "face", "person", "off"] = "auto"
     follow_smoothing: Literal["low", "medium", "high"] = "medium"
-    # Manual bbox overrides (optional; each is (left, top, right, bottom) 0..1)
+
+    # Manual bbox overrides
+    # Each bbox is (left, top, right, bottom) using values from 0.0 to 1.0
     manual_webcam_bbox: tuple[float, float, float, float] | None = None
     manual_chat_bbox: tuple[float, float, float, float] | None = None
     manual_center_bbox: tuple[float, float, float, float] | None = None
+
+
+class RenderRequest(BaseModel):
+    """
+    Lightweight render request.
+
+    This endpoint is intended to be controlled by n8n.
+    It skips Whisper, Ollama, and automatic clip selection.
+
+    n8n provides the exact start/end timestamps and the video engine
+    only downloads, crops, reframes, and renders the selected segment.
+    """
+
+    source: str = Field(
+        ...,
+        description="YouTube URL or absolute local file path to the source video."
+    )
+
+    start: float = Field(
+        ...,
+        ge=0,
+        description="Start time of the clip in seconds."
+    )
+
+    end: float = Field(
+        ...,
+        gt=0,
+        description="End time of the clip in seconds."
+    )
+
+    smart_crop: bool = True
+
+    crop_mode: Literal[
+        "center",
+        "event",
+        "auto",
+        "bottom_strip_rotate",
+        "bottom_split_stack",
+        "bottom_split_stack_swapped",
+        "webcam_chat_stack",
+        "webcam_chat_stack_bottom"
+    ] = "center"
+
+    focus_region: Literal["full", "center"] = "full"
+
+    letterbox_full_width: bool = False
 
 
 class JobSummary(BaseModel):
@@ -44,7 +95,7 @@ class ShortInfo(BaseModel):
     file: str
     title: str
     transcript: str = ""
-    url: str                 # API path to stream the video
+    url: str
 
 
 class RunDetail(BaseModel):
@@ -60,9 +111,19 @@ class PublishRequest(BaseModel):
     file: str
     title: str
     description: str = ""
-    platform: Literal["youtube", "tiktok", "facebook", "instagram"]
+
+    platform: Literal[
+        "youtube",
+        "tiktok",
+        "facebook",
+        "instagram"
+    ]
+
     mode: Literal["api", "browser"] = "api"
-    privacy_status: str | None = None    # YouTube: public/unlisted/private
+
+    # YouTube: public / unlisted / private
+    privacy_status: str | None = None
+
     tiktok_direct_post: bool = False
 
 
