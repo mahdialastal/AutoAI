@@ -168,37 +168,59 @@ def _run_pipeline_worker(job: Job, req: StartRunRequest) -> None:
         job.mark_failed(str(e))
 
 
-# ---------- lightweight render (n8n-controlled) ----------
+# ---------- lightweight async render (n8n-controlled) ----------
 
-@app.post("/api/render")
-def render_clip(req: RenderRequest) -> dict:
+# In-memory status registry for lightweight render jobs.
+#
+# The actual rendered file is still written under GENERATED/<run_folder>/.
+# The registry only stores small status/result metadata so POST /api/render
+# can return immediately instead of waiting for download + tracking + FFmpeg.
+#
+# This avoids Cloudflare 524 timeouts for long renders.
+_RENDER_JOBS: dict[str, dict] = {}
+_RENDER_JOBS_LOCK = threading.Lock()
+
+
+def _update_render_job(render_id: str, **changes) -> None:
+    """Safely update one render job's status/result metadata."""
+    with _RENDER_JOBS_LOCK:
+        job = _RENDER_JOBS.get(render_id)
+
+        if job is None:
+            return
+
+        job.update(changes)
+        job["updated_at"] = datetime.now().isoformat()
+
+
+def _run_render_worker(
+    render_id: str,
+    run_folder: str,
+    req: RenderRequest,
+) -> None:
     """
-    Lightweight video renderer for n8n.
+    Background worker for /api/render.
 
-    Downloads/locates the source, cuts the requested time range,
-    optionally estimates horizontal speaker focus, and renders
-    a 1080x1920 vertical MP4.
+    Heavy work happens here:
+    - YouTube/local source resolution
+    - face tracking
+    - dynamic/static vertical crop
+    - FFmpeg render
 
-    This route intentionally skips Whisper, Ollama, and automatic
-    highlight selection. n8n supplies the exact start/end timestamps.
+    The HTTP POST has already returned before this starts doing the
+    expensive work, so Cloudflare no longer needs to hold the request.
     """
-
-    if req.end <= req.start:
-        raise HTTPException(
-            status_code=400,
-            detail="end must be greater than start",
+    try:
+        _update_render_job(
+            render_id,
+            status="running",
+            stage="downloading",
+            message="Downloading or locating source video.",
         )
 
-    try:
-        # Download or locate source
         video_path = get_video_path(
             req.source,
             download_dir=DOWNLOADS,
-        )
-
-        # Create output folder
-        run_folder = datetime.now().strftime(
-            "render_%Y-%m-%d_%H-%M-%S"
         )
 
         output_dir = GENERATED / run_folder
@@ -209,13 +231,16 @@ def render_clip(req: RenderRequest) -> dict:
 
         output_path = output_dir / "reel.mp4"
 
-        # Smart crop:
-        # - Prefer a dynamic horizontal face track for center-crop Reels.
-        # - Fall back to the original static focus_x if no usable track is found.
         focus_x = None
         focus_track: list[tuple[float, float]] | None = None
 
         if req.smart_crop and req.crop_mode == "center":
+            _update_render_job(
+                render_id,
+                stage="tracking",
+                message="Detecting faces and building dynamic focus track.",
+            )
+
             try:
                 focus_track = estimate_focus_track(
                     video_path=video_path,
@@ -228,7 +253,7 @@ def render_clip(req: RenderRequest) -> dict:
             except Exception:
                 focus_track = None
 
-            # Keep the old static smart-crop behavior as a safe fallback.
+            # Keep the original static Smart Crop as a safe fallback.
             if not focus_track:
                 try:
                     focus_x = estimate_focus_x(
@@ -239,7 +264,15 @@ def render_clip(req: RenderRequest) -> dict:
                 except Exception:
                     focus_x = None
 
-        # Render vertical Reel
+        _update_render_job(
+            render_id,
+            stage="rendering",
+            message="Rendering 1080x1920 Reel.",
+            dynamic_focus=bool(focus_track),
+            focus_track_points=len(focus_track) if focus_track else 0,
+            focus_x=focus_x,
+        )
+
         make_short(
             video_path=video_path,
             start_sec=req.start,
@@ -256,13 +289,13 @@ def render_clip(req: RenderRequest) -> dict:
         )
 
         if not output_path.is_file():
-            raise HTTPException(
-                status_code=500,
-                detail="Render completed but output file was not created",
+            raise RuntimeError(
+                "Render completed but output file was not created"
             )
 
-        return {
+        result = {
             "ok": True,
+            "render_id": render_id,
             "run_folder": run_folder,
             "file": output_path.name,
             "start": req.start,
@@ -276,14 +309,126 @@ def render_clip(req: RenderRequest) -> dict:
             "url": f"/api/shorts/{run_folder}/{output_path.name}",
         }
 
-    except HTTPException:
-        raise
+        _update_render_job(
+            render_id,
+            status="done",
+            stage="done",
+            message="Render completed successfully.",
+            result=result,
+            error=None,
+        )
 
     except Exception as e:
+        _update_render_job(
+            render_id,
+            status="failed",
+            stage="failed",
+            message="Render failed.",
+            error=str(e),
+        )
+
+
+@app.post("/api/render", status_code=202)
+def render_clip(req: RenderRequest) -> dict:
+    """
+    Start a lightweight video render and return immediately.
+
+    This endpoint is asynchronous from the HTTP client's point of view:
+    it creates a background worker and responds with HTTP 202 plus a
+    render_id. n8n (or Swagger during testing) can then poll:
+
+        GET /api/render/{render_id}
+
+    until status becomes "done" or "failed".
+
+    This prevents Cloudflare 524 timeouts on long downloads/renders.
+    """
+
+    if req.end <= req.start:
         raise HTTPException(
-            status_code=500,
-            detail=f"Render failed: {e}",
-        ) from e
+            status_code=400,
+            detail="end must be greater than start",
+        )
+
+    now = datetime.now()
+
+    render_id = now.strftime(
+        "render_%Y%m%d_%H%M%S_%f"
+    )
+
+    run_folder = now.strftime(
+        "render_%Y-%m-%d_%H-%M-%S-%f"
+    )
+
+    created_at = now.isoformat()
+
+    with _RENDER_JOBS_LOCK:
+        _RENDER_JOBS[render_id] = {
+            "ok": True,
+            "render_id": render_id,
+            "run_folder": run_folder,
+            "status": "queued",
+            "stage": "queued",
+            "message": "Render job accepted.",
+            "created_at": created_at,
+            "updated_at": created_at,
+            "source": req.source,
+            "start": req.start,
+            "end": req.end,
+            "duration": req.end - req.start,
+            "smart_crop": req.smart_crop,
+            "dynamic_focus": False,
+            "focus_track_points": 0,
+            "focus_x": None,
+            "result": None,
+            "error": None,
+        }
+
+    t = threading.Thread(
+        target=_run_render_worker,
+        args=(
+            render_id,
+            run_folder,
+            req,
+        ),
+        daemon=True,
+    )
+
+    t.start()
+
+    return {
+        "ok": True,
+        "accepted": True,
+        "render_id": render_id,
+        "run_folder": run_folder,
+        "status": "queued",
+        "status_url": f"/api/render/{render_id}",
+    }
+
+
+@app.get("/api/render/{render_id}")
+def get_render_status(render_id: str) -> dict:
+    """
+    Get status/result for a lightweight render job.
+
+    status values:
+    - queued
+    - running
+    - done
+    - failed
+    """
+    with _RENDER_JOBS_LOCK:
+        job = _RENDER_JOBS.get(render_id)
+
+        if job is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Render job not found",
+            )
+
+        # Return a shallow copy so the response is not holding
+        # the registry object while FastAPI serializes it.
+        return dict(job)
 
 
 # ---------- runs ----------
