@@ -223,6 +223,11 @@ def _run_render_worker(
             download_dir=DOWNLOADS,
         )
 
+        _update_render_job(
+            render_id,
+            source_path=str(video_path.resolve()),
+        )
+
         output_dir = GENERATED / run_folder
         output_dir.mkdir(
             parents=True,
@@ -373,6 +378,7 @@ def render_clip(req: RenderRequest) -> dict:
             "created_at": created_at,
             "updated_at": created_at,
             "source": req.source,
+            "source_path": None,
             "start": req.start,
             "end": req.end,
             "duration": req.end - req.start,
@@ -429,6 +435,109 @@ def get_render_status(render_id: str) -> dict:
         # Return a shallow copy so the response is not holding
         # the registry object while FastAPI serializes it.
         return dict(job)
+
+
+
+
+@app.delete("/api/render/{render_id}")
+def cleanup_render(render_id: str) -> dict:
+    """
+    Delete temporary files for a completed/failed lightweight render job.
+
+    Intended flow:
+        1. n8n waits until status == "done"
+        2. n8n downloads reel.mp4
+        3. n8n uploads it to Google Drive
+        4. n8n calls this endpoint
+
+    Cleanup removes:
+    - GENERATED/<run_folder>/ and its reel.mp4
+    - the downloaded source file when it lives under DOWNLOADS and no
+      other queued/running render job is currently using that same file
+    - the in-memory render job entry
+
+    Running/queued jobs cannot be deleted.
+    """
+    with _RENDER_JOBS_LOCK:
+        job = _RENDER_JOBS.get(render_id)
+
+        if job is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Render job not found",
+            )
+
+        status = job.get("status")
+
+        if status in ("queued", "running"):
+            raise HTTPException(
+                status_code=409,
+                detail="Render job is still running and cannot be cleaned up",
+            )
+
+        run_folder = job.get("run_folder")
+        source_path_raw = job.get("source_path")
+
+        # Snapshot other active source paths before removing the job.
+        active_source_paths = {
+            str(other.get("source_path"))
+            for other_id, other in _RENDER_JOBS.items()
+            if (
+                other_id != render_id
+                and other.get("status") in ("queued", "running")
+                and other.get("source_path")
+            )
+        }
+
+    removed_generated = False
+    removed_source = False
+    skipped_source_in_use = False
+
+    # Remove generated Reel folder.
+    if run_folder:
+        output_dir = (GENERATED / str(run_folder)).resolve()
+
+        try:
+            output_dir.relative_to(GENERATED.resolve())
+        except ValueError:
+            raise HTTPException(
+                status_code=500,
+                detail="Unsafe generated path detected; cleanup aborted",
+            )
+
+        if output_dir.is_dir():
+            shutil.rmtree(output_dir)
+            removed_generated = True
+
+    # Remove downloaded source only when it is actually inside DOWNLOADS.
+    if source_path_raw:
+        source_path = Path(str(source_path_raw)).resolve()
+
+        try:
+            source_path.relative_to(DOWNLOADS.resolve())
+            source_is_temp_download = True
+        except ValueError:
+            source_is_temp_download = False
+
+        if source_is_temp_download and source_path.is_file():
+            if str(source_path) in active_source_paths:
+                skipped_source_in_use = True
+            else:
+                source_path.unlink()
+                removed_source = True
+
+    # Remove registry entry only after filesystem cleanup succeeds.
+    with _RENDER_JOBS_LOCK:
+        _RENDER_JOBS.pop(render_id, None)
+
+    return {
+        "ok": True,
+        "render_id": render_id,
+        "cleaned": True,
+        "removed_generated": removed_generated,
+        "removed_source": removed_source,
+        "skipped_source_in_use": skipped_source_in_use,
+    }
 
 
 # ---------- runs ----------
