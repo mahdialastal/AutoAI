@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 
-# Keep the presets intentionally moderate.
-# The goal is to improve the look without destroying skin tones
-# or clipping highlights/shadows.
+# Moderate-to-visible presets for social/Reels content.
+# Values are intentionally stronger than the previous version,
+# but still designed to avoid extreme clipping or unnatural skin tones.
 COLOR_PRESETS: dict[str, str | None] = {
     # No color changes.
     "none": None,
@@ -13,68 +13,69 @@ COLOR_PRESETS: dict[str, str | None] = {
     # Clean, lightly polished correction.
     "natural": (
         "eq="
-        "contrast=1.04:"
-        "brightness=0.01:"
-        "saturation=1.05:"
+        "contrast=1.08:"
+        "brightness=0.02:"
+        "saturation=1.08:"
         "gamma=1.01"
     ),
 
-    # Slightly warmer / golden look.
+    # Warmer / golden look.
     "warm": (
         "eq="
-        "contrast=1.05:"
-        "brightness=0.01:"
-        "saturation=1.07:"
+        "contrast=1.10:"
+        "brightness=0.02:"
+        "saturation=1.10:"
         "gamma=1.01,"
         "colorbalance="
-        "rs=.035:"
-        "gs=.012:"
-        "bs=-.025"
+        "rs=.060:"
+        "gs=.015:"
+        "bs=-.050"
     ),
 
-    # Slightly cooler, cleaner tech look.
+    # Cooler, cleaner tech look.
     "cool": (
         "eq="
-        "contrast=1.05:"
+        "contrast=1.10:"
         "brightness=0.00:"
-        "saturation=1.02:"
+        "saturation=1.05:"
         "gamma=1.00,"
         "colorbalance="
-        "rs=-.025:"
+        "rs=-.040:"
         "gs=.005:"
-        "bs=.035"
+        "bs=.060"
     ),
 
-    # Film-like contrast with subtle cool shadows / warm highlights.
+    # Film-like contrast with slightly reduced saturation,
+    # cooler shadows and warmer highlights.
     "cinematic": (
         "eq="
-        "contrast=1.10:"
-        "brightness=-0.01:"
-        "saturation=0.96:"
-        "gamma=0.98,"
+        "contrast=1.18:"
+        "brightness=-0.02:"
+        "saturation=0.90:"
+        "gamma=0.97,"
         "colorbalance="
-        "bs=.025:"
-        "rm=.012:"
-        "rh=.025:"
-        "bh=-.010"
+        "bs=.060:"
+        "rm=.015:"
+        "rh=.060:"
+        "bh=-.015"
     ),
 
     # Punchier social-media look.
     "vibrant": (
         "eq="
-        "contrast=1.10:"
-        "brightness=0.01:"
-        "saturation=1.20:"
-        "gamma=1.01"
+        "contrast=1.18:"
+        "brightness=0.02:"
+        "saturation=1.30:"
+        "gamma=1.02"
     ),
 
     # Moody low-key look.
     "dark": (
         "eq="
-        "contrast=1.12:"
-        "brightness=-0.055:"
+        "contrast=1.18:"
+        "brightness=-0.08:"
         "saturation=0.92:"
-        "gamma=0.94"
+        "gamma=0.92"
     ),
 }
 
