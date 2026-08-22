@@ -139,6 +139,16 @@ class RenderRequest(BaseModel):
         ),
     )
 
+    subtitle_offset: float = Field(
+        default=0.0,
+        ge=-2.0,
+        le=2.0,
+        description=(
+            "Shift all burned captions by this many seconds. "
+            "Negative values show captions earlier; positive values later."
+        ),
+    )
+
     highlight_words: list[str] = Field(
         default_factory=list,
         description=(
