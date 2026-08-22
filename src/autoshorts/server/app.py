@@ -13,6 +13,7 @@ import re
 import shutil
 import threading
 import time
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 
@@ -20,6 +21,7 @@ from fastapi import FastAPI, HTTPException, Request, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from yt_dlp import YoutubeDL
 
 from ..pipeline import run_pipeline
 from ..download import get_video_path
@@ -166,6 +168,317 @@ def _run_pipeline_worker(job: Job, req: StartRunRequest) -> None:
             )
         )
         job.mark_failed(str(e))
+
+
+
+# ---------- YouTube transcript (n8n-controlled) ----------
+
+def _format_timestamp(seconds: float) -> str:
+    """Format seconds as HH:MM:SS.mmm for AI/n8n-friendly transcript text."""
+    total_ms = max(0, int(round(float(seconds) * 1000)))
+    hours, rem = divmod(total_ms, 3_600_000)
+    minutes, rem = divmod(rem, 60_000)
+    secs, millis = divmod(rem, 1000)
+
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}.{millis:03d}"
+
+
+def _clean_caption_text(value: str) -> str:
+    """Normalize YouTube caption text while preserving the spoken wording."""
+    value = value.replace("\n", " ").replace("\r", " ")
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def _parse_json3_transcript(payload: dict) -> list[dict]:
+    """
+    Convert YouTube json3 captions to normalized transcript segments.
+
+    Returned timestamps are absolute positions in the original source video.
+    """
+    segments: list[dict] = []
+
+    for event in payload.get("events", []) or []:
+        raw_parts = event.get("segs") or []
+        if not raw_parts:
+            continue
+
+        caption_text = "".join(
+            str(part.get("utf8", ""))
+            for part in raw_parts
+        )
+        caption_text = _clean_caption_text(caption_text)
+
+        if not caption_text:
+            continue
+
+        start = float(event.get("tStartMs", 0) or 0) / 1000.0
+        duration = float(event.get("dDurationMs", 0) or 0) / 1000.0
+
+        segments.append(
+            {
+                "start": round(start, 3),
+                "duration": round(duration, 3),
+                "end": round(start + duration, 3),
+                "text": caption_text,
+            }
+        )
+
+    return segments
+
+
+def _pick_caption_track(
+    info: dict,
+    requested_language: str | None = None,
+) -> tuple[str, str, list[dict]] | None:
+    """
+    Pick the best available YouTube transcript track.
+
+    Priority:
+    1. Human subtitles
+    2. Automatic captions
+
+    Within each group:
+    - explicitly requested language
+    - video's declared language
+    - English/French
+    - first available language
+
+    Returns: (track_type, language_code, formats)
+    """
+    requested = (requested_language or "").strip().lower()
+    video_language = str(info.get("language") or "").strip().lower()
+
+    groups = (
+        ("manual", info.get("subtitles") or {}),
+        ("automatic", info.get("automatic_captions") or {}),
+    )
+
+    for track_type, tracks in groups:
+        if not tracks:
+            continue
+
+        available = list(tracks.keys())
+        candidates: list[str] = []
+
+        def add_candidate(code: str) -> None:
+            if code and code in tracks and code not in candidates:
+                candidates.append(code)
+
+        # Exact requested language first.
+        add_candidate(requested)
+
+        # Then variants such as en-US for requested "en", or fr-FR for "fr".
+        if requested:
+            requested_base = requested.split("-", 1)[0]
+            for code in available:
+                code_lower = code.lower()
+                if (
+                    code_lower == requested_base
+                    or code_lower.startswith(requested_base + "-")
+                ):
+                    add_candidate(code)
+
+        # Prefer video's own language.
+        add_candidate(video_language)
+        if video_language:
+            video_base = video_language.split("-", 1)[0]
+            for code in available:
+                code_lower = code.lower()
+                if (
+                    code_lower == video_base
+                    or code_lower.startswith(video_base + "-")
+                ):
+                    add_candidate(code)
+
+        # Useful defaults for the current France/USA workflow.
+        for preferred in ("en", "en-US", "en-GB", "fr", "fr-FR"):
+            add_candidate(preferred)
+
+        for code in available:
+            add_candidate(code)
+
+        if candidates:
+            language_code = candidates[0]
+            formats = tracks.get(language_code) or []
+            if formats:
+                return track_type, language_code, formats
+
+    return None
+
+
+def _pick_json3_format(formats: list[dict]) -> dict | None:
+    """Prefer json3 because it preserves precise segment timestamps."""
+    for item in formats:
+        if item.get("ext") == "json3" and item.get("url"):
+            return item
+
+    return None
+
+
+def _fetch_youtube_transcript(
+    source: str,
+    requested_language: str | None = None,
+) -> dict:
+    """
+    Read a transcript directly from YouTube without downloading the video
+    and without running Whisper.
+    """
+    cookie_file = os.getenv("YTDLP_COOKIES_FILE", "").strip()
+
+    ydl_opts: dict = {
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+        "remote_components": {"ejs:github"},
+    }
+
+    if cookie_file and Path(cookie_file).is_file():
+        ydl_opts["cookiefile"] = cookie_file
+
+    with YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(source, download=False)
+
+    if not info:
+        raise RuntimeError("YouTube metadata could not be loaded.")
+
+    video_id = str(info.get("id") or "")
+    title = str(info.get("title") or "")
+    duration = info.get("duration")
+
+    picked = _pick_caption_track(
+        info,
+        requested_language=requested_language,
+    )
+
+    if picked is None:
+        return {
+            "ok": True,
+            "available": False,
+            "source": source,
+            "video_id": video_id,
+            "title": title,
+            "duration": duration,
+            "language": None,
+            "track_type": None,
+            "segments": [],
+            "segment_count": 0,
+            "full_text": "",
+            "timestamped_text": "",
+        }
+
+    track_type, language_code, formats = picked
+    caption_format = _pick_json3_format(formats)
+
+    if caption_format is None:
+        # We deliberately require timestamp-rich json3 for this workflow.
+        # If YouTube exposes captions but no json3 variant, treat the
+        # transcript as unusable instead of inventing/improvising timing.
+        return {
+            "ok": True,
+            "available": False,
+            "source": source,
+            "video_id": video_id,
+            "title": title,
+            "duration": duration,
+            "language": language_code,
+            "track_type": track_type,
+            "reason": "Transcript exists but no json3 timestamp format is available.",
+            "segments": [],
+            "segment_count": 0,
+            "full_text": "",
+            "timestamped_text": "",
+        }
+
+    request = urllib.request.Request(
+        caption_format["url"],
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/130.0.0.0 Safari/537.36"
+            ),
+            "Accept": "application/json,text/plain,*/*",
+        },
+    )
+
+    with urllib.request.urlopen(request, timeout=30) as response:
+        raw = response.read()
+
+    payload = json.loads(raw.decode("utf-8"))
+    segments = _parse_json3_transcript(payload)
+
+    if not segments:
+        return {
+            "ok": True,
+            "available": False,
+            "source": source,
+            "video_id": video_id,
+            "title": title,
+            "duration": duration,
+            "language": language_code,
+            "track_type": track_type,
+            "reason": "Caption track was found but contained no usable speech segments.",
+            "segments": [],
+            "segment_count": 0,
+            "full_text": "",
+            "timestamped_text": "",
+        }
+
+    full_text = "\n".join(
+        segment["text"]
+        for segment in segments
+    )
+
+    timestamped_text = "\n".join(
+        f'[{_format_timestamp(segment["start"])}] {segment["text"]}'
+        for segment in segments
+    )
+
+    return {
+        "ok": True,
+        "available": True,
+        "source": source,
+        "video_id": video_id,
+        "title": title,
+        "duration": duration,
+        "language": language_code,
+        "track_type": track_type,
+        "segment_count": len(segments),
+        "segments": segments,
+        "full_text": full_text,
+        "timestamped_text": timestamped_text,
+    }
+
+
+@app.get("/api/transcript")
+def youtube_transcript(
+    source: str,
+    language: str | None = None,
+) -> dict:
+    """
+    Return YouTube transcript + timestamps for n8n.
+
+    - Does NOT download the source video.
+    - Does NOT run Whisper.
+    - Uses YouTube human subtitles first, then automatic captions.
+    - `language` is optional, e.g. en or fr.
+    """
+    if not source or not source.strip():
+        raise HTTPException(
+            status_code=422,
+            detail="source is required",
+        )
+
+    try:
+        return _fetch_youtube_transcript(
+            source=source.strip(),
+            requested_language=language,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Could not retrieve YouTube transcript: {exc}",
+        ) from exc
 
 
 # ---------- lightweight async render (n8n-controlled) ----------
