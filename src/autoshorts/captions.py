@@ -26,9 +26,6 @@ def _ass_time(seconds: float) -> str:
 def _text_direction(value: str) -> str:
     """
     Detect paragraph direction from the first strong Unicode character.
-
-    Covers Arabic/Persian/Urdu/Hebrew and other RTL scripts automatically,
-    while English/French/Spanish/etc. remain LTR.
     """
     import unicodedata
 
@@ -44,21 +41,49 @@ def _text_direction(value: str) -> str:
     return "ltr"
 
 
-def _apply_bidi_isolate(value: str) -> str:
+def _prepare_bidi_text(value: str) -> str:
     """
-    Wrap a caption in a Unicode directional isolate.
+    Prepare mixed RTL/LTR text for libass/FriBidi.
 
-    RLI/LRI + PDI lets libass/FriBidi keep mixed Arabic+English,
-    French+numbers, URLs, brand names, etc. in the correct visual order.
+    Important:
+    - Do NOT wrap the whole Arabic line in an isolate. That can reorder
+      multi-line captions unexpectedly after ASS override tags are inserted.
+    - Instead, set paragraph direction with RLM/LRM and isolate only embedded
+      opposite-direction runs such as English words inside Arabic.
     """
     value = str(value or "")
 
-    # Unicode Directional Isolates:
+    # Unicode controls:
+    # RLM = U+200F, LRM = U+200E
     # RLI = U+2067, LRI = U+2066, PDI = U+2069
-    if _text_direction(value) == "rtl":
-        return "\u2067" + value + "\u2069"
+    RLM = "\u200f"
+    LRM = "\u200e"
+    RLI = "\u2067"
+    LRI = "\u2066"
+    PDI = "\u2069"
 
-    return "\u2066" + value + "\u2069"
+    direction = _text_direction(value)
+
+    if direction == "rtl":
+        # Keep English / numbers / Latin brand names as local LTR runs.
+        latin_run = re.compile(
+            r"([A-Za-zÀ-ÖØ-öø-ÿ0-9][A-Za-zÀ-ÖØ-öø-ÿ0-9._%+\-/:@#&']*)"
+        )
+        value = latin_run.sub(
+            lambda m: LRI + m.group(1) + PDI,
+            value,
+        )
+        return RLM + value
+
+    # LTR paragraph: isolate embedded Arabic/Hebrew runs.
+    rtl_run = re.compile(
+        r"([\u0590-\u08FF\uFB1D-\uFDFF\uFE70-\uFEFF]+(?:\s+[\u0590-\u08FF\uFB1D-\uFDFF\uFE70-\uFEFF]+)*)"
+    )
+    value = rtl_run.sub(
+        lambda m: RLI + m.group(1) + PDI,
+        value,
+    )
+    return LRM + value
 
 
 def _escape_ass_text(value: str) -> str:
@@ -175,10 +200,21 @@ def _highlight_ass_text(
     value: str,
     highlight_words: list[str] | None,
 ) -> str:
-    """Escape caption text and add ASS yellow/bold tags to selected words."""
+    """
+    Render caption text with optional highlighted words.
+
+    Highlight matching happens before Unicode BiDi controls are injected.
+    This keeps words like "Fake" matchable while preserving Arabic order.
+    """
     raw = re.sub(r"\s+", " ", str(value or "")).strip()
     if not raw:
         return ""
+
+    wrapped = _wrap_caption(
+        raw,
+        width=26,
+        max_lines=2,
+    )
 
     words = [
         str(word).strip()
@@ -187,16 +223,16 @@ def _highlight_ass_text(
     ]
 
     if not words:
-        return _escape_ass_text(_apply_bidi_isolate(_wrap_caption(raw, width=26, max_lines=2)))
+        prepared = _prepare_bidi_text(wrapped)
+        escaped = _escape_ass_text(prepared)
+        return escaped.replace(r"\\N", r"\N")
 
-    # Longest first prevents a short highlight from swallowing a longer phrase.
     words = sorted(set(words), key=len, reverse=True)
     pattern = re.compile(
         "(" + "|".join(re.escape(word) for word in words) + ")",
         flags=re.IGNORECASE,
     )
 
-    wrapped = _apply_bidi_isolate(_wrap_caption(raw, width=26, max_lines=2))
     parts = pattern.split(wrapped)
 
     rendered: list[str] = []
@@ -204,16 +240,18 @@ def _highlight_ass_text(
         if not part:
             continue
 
-        if pattern.fullmatch(part):
+        is_highlight = bool(pattern.fullmatch(part))
+        prepared = _prepare_bidi_text(part)
+        escaped = _escape_ass_text(prepared)
+        escaped = escaped.replace(r"\\N", r"\N")
+
+        if is_highlight:
             rendered.append(
                 r"{\c&H0000FFFF&\b1}"
-                + _escape_ass_text(part)
+                + escaped
                 + r"{\rCaption}"
             )
         else:
-            # Preserve the explicit ASS line break inserted by _wrap_caption.
-            escaped = _escape_ass_text(part)
-            escaped = escaped.replace(r"\\N", r"\N")
             rendered.append(escaped)
 
     return "".join(rendered)
@@ -343,7 +381,7 @@ ScaledBorderAndShadow: yes
 [V4+ Styles]
 Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding
 Style: Hook,DejaVu Sans,56,&H00FFFFFF,&H00FFFFFF,&H80000000,&H80000000,-1,0,0,0,100,100,0,0,3,3,0,8,95,95,120,1
-Style: Caption,DejaVu Sans,48,&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,4,1,2,105,105,190,1
+Style: Caption,DejaVu Sans,48,&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,4,1,2,115,115,190,1
 
 [Events]
 Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
@@ -356,7 +394,7 @@ Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
             duration,
             max(0.5, float(hook_duration)),
         )
-        hook_text = _escape_ass_text(_apply_bidi_isolate(_wrap_caption(hook, width=24, max_lines=2)))
+        hook_text = _escape_ass_text(_prepare_bidi_text(_wrap_caption(hook, width=24, max_lines=2)))
         hook_text = hook_text.replace(r"\\N", r"\N")
 
         events.append(
