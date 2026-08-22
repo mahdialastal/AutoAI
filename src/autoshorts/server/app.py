@@ -695,6 +695,7 @@ def _run_render_worker(
             subtitle_count=len(req.subtitles),
             subtitle_offset=req.subtitle_offset,
             highlight_word_count=len(req.highlight_words),
+            color_preset=req.color_preset,
         )
 
         make_short(
@@ -710,6 +711,7 @@ def _run_render_worker(
             crop_mode=req.crop_mode,
             focus_region=req.focus_region,
             letterbox_full_width=req.letterbox_full_width,
+            color_preset=req.color_preset,
         )
 
         if not output_path.is_file():
@@ -735,6 +737,7 @@ def _run_render_worker(
             "subtitle_offset": req.subtitle_offset,
             "highlight_words": req.highlight_words,
             "subtitle_timebase": req.subtitle_timebase,
+            "color_preset": req.color_preset,
             "resolution": "1080x1920",
             "url": f"/api/shorts/{run_folder}/{output_path.name}",
         }
@@ -816,6 +819,7 @@ def render_clip(req: RenderRequest) -> dict:
             "subtitle_count": len(req.subtitles),
             "subtitle_offset": req.subtitle_offset,
             "highlight_word_count": len(req.highlight_words),
+            "color_preset": req.color_preset,
             "result": None,
             "error": None,
         }
