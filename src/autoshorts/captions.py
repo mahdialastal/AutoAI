@@ -23,6 +23,44 @@ def _ass_time(seconds: float) -> str:
     return f"{hours}:{minutes:02d}:{secs:02d}.{centis:02d}"
 
 
+def _text_direction(value: str) -> str:
+    """
+    Detect paragraph direction from the first strong Unicode character.
+
+    Covers Arabic/Persian/Urdu/Hebrew and other RTL scripts automatically,
+    while English/French/Spanish/etc. remain LTR.
+    """
+    import unicodedata
+
+    for char in str(value or ""):
+        bidi = unicodedata.bidirectional(char)
+
+        if bidi in {"R", "AL"}:
+            return "rtl"
+
+        if bidi == "L":
+            return "ltr"
+
+    return "ltr"
+
+
+def _apply_bidi_isolate(value: str) -> str:
+    """
+    Wrap a caption in a Unicode directional isolate.
+
+    RLI/LRI + PDI lets libass/FriBidi keep mixed Arabic+English,
+    French+numbers, URLs, brand names, etc. in the correct visual order.
+    """
+    value = str(value or "")
+
+    # Unicode Directional Isolates:
+    # RLI = U+2067, LRI = U+2066, PDI = U+2069
+    if _text_direction(value) == "rtl":
+        return "\u2067" + value + "\u2069"
+
+    return "\u2066" + value + "\u2069"
+
+
 def _escape_ass_text(value: str) -> str:
     """Escape text so user/AI content cannot inject ASS override tags."""
     value = str(value or "")
@@ -32,12 +70,12 @@ def _escape_ass_text(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
 
 
-def _wrap_caption(value: str, width: int = 34) -> str:
+def _wrap_caption(value: str, width: int = 26, max_lines: int = 2) -> str:
     """
-    Wrap caption text to a maximum approximate line width.
+    Wrap text for a 1080x1920 Reel without letting it leave the safe area.
 
-    ASS/libass handles RTL direction; this only inserts line breaks so long
-    sentences do not span the full phone screen.
+    Unlike the old version, overflow is NOT merged into one huge second line.
+    Each visible caption is capped to a small number of short lines.
     """
     clean = re.sub(r"\s+", " ", str(value or "")).strip()
     if not clean:
@@ -50,11 +88,87 @@ def _wrap_caption(value: str, width: int = 34) -> str:
         break_on_hyphens=False,
     )
 
-    if len(lines) <= 2:
-        return r"\N".join(lines)
+    return r"\N".join(lines[:max_lines])
 
-    # Keep captions compact: merge overflow into line 2.
-    return lines[0] + r"\N" + " ".join(lines[1:])
+
+def _split_text_chunks(
+    value: str,
+    max_chars: int = 48,
+) -> list[str]:
+    """
+    Split a long subtitle into compact readable chunks.
+
+    This is intentionally word-based. Timing for the chunks is assigned
+    proportionally inside the source caption interval.
+    """
+    clean = re.sub(r"\s+", " ", str(value or "")).strip()
+    if not clean:
+        return []
+
+    words = clean.split()
+    chunks: list[str] = []
+    current: list[str] = []
+
+    for word in words:
+        candidate = " ".join(current + [word])
+
+        if current and len(candidate) > max_chars:
+            chunks.append(" ".join(current))
+            current = [word]
+        else:
+            current.append(word)
+
+    if current:
+        chunks.append(" ".join(current))
+
+    return chunks
+
+
+def _expand_long_segments(
+    segments: list[dict],
+    max_chars: int = 48,
+) -> list[dict]:
+    """
+    Break long caption text into several short on-screen captions.
+
+    The original source timing is preserved as a whole, then divided between
+    text chunks by word count. This keeps captions much closer to speech than
+    displaying one long sentence for the entire interval.
+    """
+    expanded: list[dict] = []
+
+    for item in segments:
+        text = str(item.get("text", "") or "").strip()
+        chunks = _split_text_chunks(text, max_chars=max_chars)
+
+        if len(chunks) <= 1:
+            expanded.append(item)
+            continue
+
+        start = float(item["start"])
+        end = float(item["end"])
+        duration = max(0.08, end - start)
+
+        weights = [max(1, len(chunk.split())) for chunk in chunks]
+        total_weight = sum(weights)
+
+        cursor = start
+        for i, (chunk, weight) in enumerate(zip(chunks, weights)):
+            if i == len(chunks) - 1:
+                chunk_end = end
+            else:
+                chunk_end = cursor + duration * (weight / total_weight)
+
+            expanded.append(
+                {
+                    "start": cursor,
+                    "end": chunk_end,
+                    "text": chunk,
+                }
+            )
+            cursor = chunk_end
+
+    return expanded
 
 
 def _highlight_ass_text(
@@ -73,7 +187,7 @@ def _highlight_ass_text(
     ]
 
     if not words:
-        return _escape_ass_text(_wrap_caption(raw))
+        return _escape_ass_text(_apply_bidi_isolate(_wrap_caption(raw, width=26, max_lines=2)))
 
     # Longest first prevents a short highlight from swallowing a longer phrase.
     words = sorted(set(words), key=len, reverse=True)
@@ -82,7 +196,7 @@ def _highlight_ass_text(
         flags=re.IGNORECASE,
     )
 
-    wrapped = _wrap_caption(raw)
+    wrapped = _apply_bidi_isolate(_wrap_caption(raw, width=26, max_lines=2))
     parts = pattern.split(wrapped)
 
     rendered: list[str] = []
@@ -164,11 +278,16 @@ def _normalize_segments(
                 next_start,
             )
 
-    return [
+    normalized = [
         item
         for item in normalized
         if item["end"] - item["start"] >= 0.08
     ]
+
+    return _expand_long_segments(
+        normalized,
+        max_chars=48,
+    )
 
 
 def build_ass_overlay(
@@ -188,6 +307,7 @@ def build_ass_overlay(
     - Hook at the top
     - Spoken captions at the bottom
     - Highlighted words inside captions
+    - Automatic RTL/LTR direction for multilingual text
 
     Returns None when there is nothing to burn.
     """
@@ -215,8 +335,8 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding
-Style: Hook,DejaVu Sans,60,&H00FFFFFF,&H00FFFFFF,&H80000000,&H80000000,-1,0,0,0,100,100,0,0,3,3,0,8,70,70,110,1
-Style: Caption,DejaVu Sans,54,&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,4,1,2,70,70,165,1
+Style: Hook,DejaVu Sans,56,&H00FFFFFF,&H00FFFFFF,&H80000000,&H80000000,-1,0,0,0,100,100,0,0,3,3,0,8,95,95,120,1
+Style: Caption,DejaVu Sans,48,&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,4,1,2,105,105,190,1
 
 [Events]
 Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
@@ -229,7 +349,7 @@ Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
             duration,
             max(0.5, float(hook_duration)),
         )
-        hook_text = _escape_ass_text(_wrap_caption(hook, width=30))
+        hook_text = _escape_ass_text(_apply_bidi_isolate(_wrap_caption(hook, width=24, max_lines=2)))
         hook_text = hook_text.replace(r"\\N", r"\N")
 
         events.append(
