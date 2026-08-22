@@ -9,6 +9,8 @@ RUN apt-get update && apt-get install -y \
     unzip \
     libglib2.0-0 \
     libgl1 \
+    fonts-dejavu-core \
+    fontconfig \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Deno for yt-dlp YouTube JavaScript challenges
