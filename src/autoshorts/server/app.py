@@ -24,7 +24,7 @@ from fastapi.staticfiles import StaticFiles
 from ..pipeline import run_pipeline
 from ..download import get_video_path
 from ..export import make_short
-from ..focus import estimate_focus_x
+from ..focus import estimate_focus_x, estimate_focus_track
 from ..publish import publish as publish_dispatch
 from .jobs import Job, ProgressEvent, REGISTRY
 from .models import (
@@ -209,18 +209,35 @@ def render_clip(req: RenderRequest) -> dict:
 
         output_path = output_dir / "reel.mp4"
 
-        # Detect horizontal speaker position for simple interview videos
+        # Smart crop:
+        # - Prefer a dynamic horizontal face track for center-crop Reels.
+        # - Fall back to the original static focus_x if no usable track is found.
         focus_x = None
+        focus_track: list[tuple[float, float]] | None = None
 
         if req.smart_crop and req.crop_mode == "center":
             try:
-                focus_x = estimate_focus_x(
-                    video_path,
-                    req.start,
-                    req.end,
+                focus_track = estimate_focus_track(
+                    video_path=video_path,
+                    start_sec=req.start,
+                    end_sec=req.end,
+                    sample_interval=0.5,
+                    smoothing=0.35,
+                    dead_zone=0.025,
                 )
             except Exception:
-                focus_x = None
+                focus_track = None
+
+            # Keep the old static smart-crop behavior as a safe fallback.
+            if not focus_track:
+                try:
+                    focus_x = estimate_focus_x(
+                        video_path,
+                        req.start,
+                        req.end,
+                    )
+                except Exception:
+                    focus_x = None
 
         # Render vertical Reel
         make_short(
@@ -232,6 +249,7 @@ def render_clip(req: RenderRequest) -> dict:
             width=1080,
             height=1920,
             focus_x=focus_x,
+            focus_track=focus_track,
             crop_mode=req.crop_mode,
             focus_region=req.focus_region,
             letterbox_full_width=req.letterbox_full_width,
@@ -251,6 +269,8 @@ def render_clip(req: RenderRequest) -> dict:
             "end": req.end,
             "duration": req.end - req.start,
             "smart_crop": req.smart_crop,
+            "dynamic_focus": bool(focus_track),
+            "focus_track_points": len(focus_track) if focus_track else 0,
             "focus_x": focus_x,
             "resolution": "1080x1920",
             "url": f"/api/shorts/{run_folder}/{output_path.name}",
