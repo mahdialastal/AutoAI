@@ -224,6 +224,7 @@ def _normalize_segments(
     clip_start: float,
     clip_end: float,
     timebase: str,
+    subtitle_offset: float = 0.0,
 ) -> list[dict]:
     """
     Convert subtitle timestamps to clip-relative time and prevent overlap.
@@ -248,6 +249,10 @@ def _normalize_segments(
         if timebase == "source":
             start -= clip_start
             end -= clip_start
+
+        # Global timing correction. Negative values display captions earlier.
+        start += float(subtitle_offset)
+        end += float(subtitle_offset)
 
         if end <= 0 or start >= duration:
             continue
@@ -298,6 +303,7 @@ def build_ass_overlay(
     hook: str | None = None,
     highlight_words: list[str] | None = None,
     timebase: str = "source",
+    subtitle_offset: float = 0.0,
     hook_duration: float = 4.0,
     width: int = 1080,
     height: int = 1920,
@@ -317,6 +323,7 @@ def build_ass_overlay(
         clip_start=float(clip_start),
         clip_end=float(clip_end),
         timebase=timebase,
+        subtitle_offset=float(subtitle_offset),
     )
 
     if not hook and not normalized:
