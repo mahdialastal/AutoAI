@@ -17,6 +17,78 @@ import cv2
 import mediapipe as mp
 
 
+def _create_face_detectors():
+    """
+    Create two MediaPipe face detectors:
+
+    - model_selection=0: short-range detector, better for large/close faces.
+    - model_selection=1: full-range detector, better for small/distant faces.
+
+    Using both makes Smart Crop more robust across interviews, podcasts,
+    wide shots, and close-up talking-head videos.
+    """
+    return [
+        mp.solutions.face_detection.FaceDetection(
+            model_selection=0,
+            min_detection_confidence=0.25,
+        ),
+        mp.solutions.face_detection.FaceDetection(
+            model_selection=1,
+            min_detection_confidence=0.25,
+        ),
+    ]
+
+
+def _detect_faces(detectors, rgb):
+    """
+    Run all configured face detectors and merge their detections.
+
+    Duplicate detections are acceptable for the current scoring logic,
+    but obvious near-identical duplicates are removed using face-center
+    distance so one face does not get counted twice.
+    """
+    merged = []
+
+    for detector in detectors:
+        try:
+            result = detector.process(rgb)
+        except Exception:
+            continue
+
+        if not result.detections:
+            continue
+
+        for detection in result.detections:
+            box = detection.location_data.relative_bounding_box
+            cx = box.xmin + box.width / 2.0
+            cy = box.ymin + box.height / 2.0
+
+            duplicate = False
+
+            for existing in merged:
+                ebox = existing.location_data.relative_bounding_box
+                ecx = ebox.xmin + ebox.width / 2.0
+                ecy = ebox.ymin + ebox.height / 2.0
+
+                if abs(cx - ecx) < 0.03 and abs(cy - ecy) < 0.03:
+                    duplicate = True
+                    break
+
+            if not duplicate:
+                merged.append(detection)
+
+    return merged
+
+
+def _close_face_detectors(detectors) -> None:
+    """Close MediaPipe detector resources safely."""
+    for detector in detectors:
+        try:
+            detector.close()
+        except Exception:
+            pass
+
+
 def estimate_focus_x(
     video_path: Path,
     start_sec: float,
@@ -45,10 +117,7 @@ def estimate_focus_x(
 
     xs: list[float] = []
 
-    face_detection = mp.solutions.face_detection.FaceDetection(
-        model_selection=0,
-        min_detection_confidence=0.4,
-    )
+    face_detectors = _create_face_detectors()
 
     try:
         for t in sample_times:
@@ -72,14 +141,17 @@ def estimate_focus_x(
                 cv2.COLOR_BGR2RGB,
             )
 
-            result = face_detection.process(rgb)
+            detections = _detect_faces(
+                face_detectors,
+                rgb,
+            )
 
-            if not result.detections:
+            if not detections:
                 continue
 
             # Take the highest-score detection
             best = max(
-                result.detections,
+                detections,
                 key=lambda d: (
                     d.score[0]
                     if d.score
@@ -98,7 +170,7 @@ def estimate_focus_x(
                 xs.append(cx)
 
     finally:
-        face_detection.close()
+        _close_face_detectors(face_detectors)
         cap.release()
 
     if not xs:
@@ -172,10 +244,7 @@ def estimate_focus_track(
     if not cap.isOpened():
         return []
 
-    face_detection = mp.solutions.face_detection.FaceDetection(
-        model_selection=0,
-        min_detection_confidence=0.4,
-    )
+    face_detectors = _create_face_detectors()
 
     track: list[tuple[float, float]] = []
 
@@ -211,11 +280,14 @@ def estimate_focus_track(
                 cv2.COLOR_BGR2RGB,
             )
 
-            result = face_detection.process(rgb)
+            detections = _detect_faces(
+                face_detectors,
+                rgb,
+            )
 
             detected_x: Optional[float] = None
 
-            if result.detections:
+            if detections:
                 candidates: list[
                     tuple[
                         float,
@@ -224,7 +296,7 @@ def estimate_focus_track(
                     ]
                 ] = []
 
-                for detection in result.detections:
+                for detection in detections:
                     box = (
                         detection.location_data
                         .relative_bounding_box
@@ -347,7 +419,7 @@ def estimate_focus_track(
             relative_time += sample_interval
 
     finally:
-        face_detection.close()
+        _close_face_detectors(face_detectors)
         cap.release()
 
     return track
@@ -419,18 +491,18 @@ def get_face_bbox(
         cv2.COLOR_BGR2RGB,
     )
 
-    face_detection = mp.solutions.face_detection.FaceDetection(
-        model_selection=0,
-        min_detection_confidence=0.4,
-    )
+    face_detectors = _create_face_detectors()
 
     try:
-        result = face_detection.process(rgb)
+        detections = _detect_faces(
+            face_detectors,
+            rgb,
+        )
 
-        if not result.detections:
+        if not detections:
             return None
 
-        candidates = result.detections
+        candidates = detections
 
         if prefer_bottom_half:
             bottom_half = [
@@ -503,7 +575,7 @@ def get_face_bbox(
         )
 
     finally:
-        face_detection.close()
+        _close_face_detectors(face_detectors)
 
 
 def _expand_bbox_for_webcam(
