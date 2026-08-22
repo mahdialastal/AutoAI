@@ -189,6 +189,40 @@ def _clean_caption_text(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
 
 
+def _language_base(code: str | None) -> str | None:
+    """Return the base language code, e.g. en-US -> en, fr-FR -> fr."""
+    if not code:
+        return None
+
+    normalized = str(code).strip().lower().replace("_", "-")
+    if not normalized:
+        return None
+
+    return normalized.split("-", 1)[0]
+
+
+def _language_match(
+    detected_language: str | None,
+    expected_language: str | None,
+) -> bool | None:
+    """
+    Compare base language codes.
+
+    Returns:
+    - True/False when expected_language was supplied
+    - None when no expected language was supplied
+    """
+    expected_base = _language_base(expected_language)
+    if expected_base is None:
+        return None
+
+    detected_base = _language_base(detected_language)
+    if detected_base is None:
+        return False
+
+    return detected_base == expected_base
+
+
 def _parse_json3_transcript(payload: dict) -> list[dict]:
     """
     Convert YouTube json3 captions to normalized transcript segments.
@@ -317,7 +351,7 @@ def _pick_json3_format(formats: list[dict]) -> dict | None:
 
 def _fetch_youtube_transcript(
     source: str,
-    requested_language: str | None = None,
+    expected_language: str | None = None,
 ) -> dict:
     """
     Read a transcript directly from YouTube without downloading the video
@@ -345,10 +379,15 @@ def _fetch_youtube_transcript(
     title = str(info.get("title") or "")
     duration = info.get("duration")
 
+    # Always auto-select the transcript language from YouTube metadata.
+    # expected_language is validation-only; it does not force another
+    # subtitle track and therefore avoids accidental language conflicts.
     picked = _pick_caption_track(
         info,
-        requested_language=requested_language,
+        requested_language=None,
     )
+
+    metadata_language = str(info.get("language") or "").strip() or None
 
     if picked is None:
         return {
@@ -359,6 +398,12 @@ def _fetch_youtube_transcript(
             "title": title,
             "duration": duration,
             "language": None,
+            "detected_language": metadata_language,
+            "expected_language": expected_language,
+            "language_match": _language_match(
+                metadata_language,
+                expected_language,
+            ),
             "track_type": None,
             "segments": [],
             "segment_count": 0,
@@ -367,6 +412,11 @@ def _fetch_youtube_transcript(
         }
 
     track_type, language_code, formats = picked
+
+    # Prefer YouTube's declared original video language. If it is missing,
+    # fall back to the selected transcript track language.
+    detected_language = metadata_language or language_code
+
     caption_format = _pick_json3_format(formats)
 
     if caption_format is None:
@@ -381,6 +431,12 @@ def _fetch_youtube_transcript(
             "title": title,
             "duration": duration,
             "language": language_code,
+            "detected_language": detected_language,
+            "expected_language": expected_language,
+            "language_match": _language_match(
+                detected_language,
+                expected_language,
+            ),
             "track_type": track_type,
             "reason": "Transcript exists but no json3 timestamp format is available.",
             "segments": [],
@@ -416,6 +472,12 @@ def _fetch_youtube_transcript(
             "title": title,
             "duration": duration,
             "language": language_code,
+            "detected_language": detected_language,
+            "expected_language": expected_language,
+            "language_match": _language_match(
+                detected_language,
+                expected_language,
+            ),
             "track_type": track_type,
             "reason": "Caption track was found but contained no usable speech segments.",
             "segments": [],
@@ -442,6 +504,12 @@ def _fetch_youtube_transcript(
         "title": title,
         "duration": duration,
         "language": language_code,
+        "detected_language": detected_language,
+        "expected_language": expected_language,
+        "language_match": _language_match(
+            detected_language,
+            expected_language,
+        ),
         "track_type": track_type,
         "segment_count": len(segments),
         "segments": segments,
@@ -453,15 +521,26 @@ def _fetch_youtube_transcript(
 @app.get("/api/transcript")
 def youtube_transcript(
     source: str,
-    language: str | None = None,
+    expected_language: str | None = None,
 ) -> dict:
     """
     Return YouTube transcript + timestamps for n8n.
 
+    Language behavior:
+    - Transcript language is selected automatically from YouTube metadata.
+    - `expected_language` is optional and validation-only.
+    - It never forces another caption track.
+    - Response includes detected_language + language_match.
+
+    Examples:
+        /api/transcript?source=<youtube_url>
+        /api/transcript?source=<youtube_url>&expected_language=en
+        /api/transcript?source=<youtube_url>&expected_language=fr
+
+    This endpoint:
     - Does NOT download the source video.
     - Does NOT run Whisper.
     - Uses YouTube human subtitles first, then automatic captions.
-    - `language` is optional, e.g. en or fr.
     """
     if not source or not source.strip():
         raise HTTPException(
@@ -472,7 +551,7 @@ def youtube_transcript(
     try:
         return _fetch_youtube_transcript(
             source=source.strip(),
-            requested_language=language,
+            expected_language=expected_language,
         )
     except Exception as exc:
         raise HTTPException(
