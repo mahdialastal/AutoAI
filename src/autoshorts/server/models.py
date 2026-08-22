@@ -68,9 +68,10 @@ class RenderRequest(BaseModel):
     - optional hook
     - subtitle lines + timestamps
     - optional words/phrases to highlight
+    - optional video color preset
 
     AutoAI then performs Smart Crop + speaker tracking + hook + captions
-    in the SAME render and outputs one final reel.mp4.
+    + color grading in the SAME render and outputs one final reel.mp4.
     """
 
     source: str = Field(
@@ -109,6 +110,24 @@ class RenderRequest(BaseModel):
     ] = "full"
 
     letterbox_full_width: bool = False
+
+    # Optional color grading preset.
+    # "none" leaves the source colors untouched.
+    color_preset: Literal[
+        "none",
+        "natural",
+        "warm",
+        "cool",
+        "cinematic",
+        "vibrant",
+        "dark",
+    ] = Field(
+        default="none",
+        description=(
+            "Optional full-video color grading preset. "
+            "Applied during the same final FFmpeg render pass."
+        ),
+    )
 
     # Final-Reel text overlay fields.
     hook: str | None = Field(
