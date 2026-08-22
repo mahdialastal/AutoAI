@@ -5,6 +5,8 @@ import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from .color_presets import get_color_filter
+
 if TYPE_CHECKING:
     from .tracking import TrackPoint
 
@@ -46,6 +48,26 @@ def _get_video_dimensions(
     return None
 
 
+def _apply_color_to_filter_complex(
+    filter_complex: str,
+    color_filter: str | None,
+) -> tuple[str, str]:
+    """
+    Apply color grading to a filter_complex graph that ends in [out].
+
+    Returns:
+        (updated_filter_complex, output_label)
+    """
+    if not color_filter:
+        return filter_complex, "[out]"
+
+    return (
+        filter_complex
+        + f";[out]{color_filter}[out_color]",
+        "[out_color]",
+    )
+
+
 def make_short(
     video_path: Path,
     start_sec: float,
@@ -78,6 +100,7 @@ def make_short(
     center_bbox: tuple[float, float, float, float] | None = None,
     event_bbox: tuple[float, float, float, float] | None = None,
     letterbox_full_width: bool = False,
+    color_preset: str = "none",
 ) -> Path:
     """
     Extract [start_sec, end_sec], crop to height x width (9:16),
@@ -92,6 +115,7 @@ def make_short(
     """
 
     duration = end_sec - start_sec
+    color_filter = get_color_filter(color_preset)
 
     output_path = Path(output_path)
     output_path.parent.mkdir(
@@ -130,6 +154,7 @@ def make_short(
             srt_path=srt_path,
             width=width,
             height=height,
+            color_preset=color_preset,
         )
 
     # Optional pre-crop used for screen recordings where a
@@ -445,6 +470,14 @@ def make_short(
             )
 
     if (
+        color_filter
+        and vf_parts is not None
+    ):
+        vf_parts.append(
+            color_filter
+        )
+
+    if (
         srt_path
         and srt_path.exists()
     ):
@@ -697,6 +730,11 @@ def make_short(
                 "vstack=inputs=2[out]"
             )
 
+        fc, fc_output_label = _apply_color_to_filter_complex(
+            fc,
+            color_filter,
+        )
+
         cmd = [
             "ffmpeg",
             "-y",
@@ -711,7 +749,7 @@ def make_short(
             "-filter_complex",
             fc,
             "-map",
-            "[out]",
+            fc_output_label,
             "-map",
             "0:a?",
             "-c:a",
@@ -737,7 +775,18 @@ def make_short(
             f"{height}"
         )
 
-        vf_fallback = scale_crop
+        vf_fallback_parts = [
+            scale_crop,
+        ]
+
+        if color_filter:
+            vf_fallback_parts.append(
+                color_filter
+            )
+
+        vf_fallback = ",".join(
+            vf_fallback_parts
+        )
 
         cmd = [
             "ffmpeg",
@@ -847,6 +896,11 @@ def make_short(
                 "[out]"
             )
 
+        fc, fc_output_label = _apply_color_to_filter_complex(
+            fc,
+            color_filter,
+        )
+
         cmd = [
             "ffmpeg",
             "-y",
@@ -861,7 +915,7 @@ def make_short(
             "-filter_complex",
             fc,
             "-map",
-            "[out]",
+            fc_output_label,
             "-map",
             "0:a?",
             "-c:a",
@@ -1168,6 +1222,7 @@ def make_short_focus_track(
     width: int = 1080,
     height: int = 1920,
     fps: float | None = None,
+    color_preset: str = "none",
 ) -> Path:
     """
     Render a dynamic 9:16 crop using the horizontal face track
@@ -1302,6 +1357,15 @@ def make_short_focus_track(
     )
 
     vf_parts: list[str] = []
+
+    color_filter = get_color_filter(
+        color_preset
+    )
+
+    if color_filter:
+        vf_parts.append(
+            color_filter
+        )
 
     if (
         srt_path
@@ -1543,6 +1607,7 @@ def make_short_focus_track(
                 width=width,
                 height=height,
                 fps=src_fps,
+                color_preset=color_preset,
             )
 
         raise RuntimeError(
@@ -1565,6 +1630,7 @@ def make_short_dynamic(
     width: int = 1080,
     height: int = 1920,
     fps: float | None = None,
+    color_preset: str = "none",
 ) -> Path:
     """
     Render a 9:16 clip whose crop window follows
@@ -1684,6 +1750,15 @@ def make_short_dynamic(
     )
 
     vf_parts = []
+
+    color_filter = get_color_filter(
+        color_preset
+    )
+
+    if color_filter:
+        vf_parts.append(
+            color_filter
+        )
 
     if (
         srt_path
@@ -1923,6 +1998,7 @@ def make_short_dynamic(
                 width=width,
                 height=height,
                 fps=src_fps,
+                color_preset=color_preset,
             )
 
         raise RuntimeError(
