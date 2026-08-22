@@ -87,12 +87,33 @@ def _prepare_bidi_text(value: str) -> str:
 
 
 def _escape_ass_text(value: str) -> str:
-    """Escape text so user/AI content cannot inject ASS override tags."""
+    """
+    Escape text for ASS while preserving intentional \\N line breaks.
+
+    We temporarily replace ASS line breaks with a private placeholder,
+    escape user text, then restore the real ASS \\N control sequence.
+    """
     value = str(value or "")
+
+    placeholder = "\uFFF0ASS_LINE_BREAK\uFFF1"
+
+    # Preserve intentional ASS hard line breaks inserted by _wrap_caption.
+    value = value.replace(r"\N", placeholder)
+
+    # Normalize actual newlines from input text.
+    value = value.replace("\r", " ").replace("\n", " ")
+
+    # Escape ASS-sensitive characters.
     value = value.replace("\\", r"\\")
     value = value.replace("{", r"\{").replace("}", r"\}")
-    value = value.replace("\r", " ").replace("\n", r"\N")
-    return re.sub(r"\s+", " ", value).strip()
+
+    # Collapse ordinary whitespace without touching the placeholder.
+    value = re.sub(r"[ \t]+", " ", value).strip()
+
+    # Restore exactly one ASS hard line-break sequence.
+    value = value.replace(placeholder, r"\N")
+
+    return value
 
 
 def _wrap_caption(value: str, width: int = 26, max_lines: int = 2) -> str:
@@ -212,7 +233,7 @@ def _highlight_ass_text(
 
     wrapped = _wrap_caption(
         raw,
-        width=26,
+        width=22,
         max_lines=2,
     )
 
@@ -225,7 +246,7 @@ def _highlight_ass_text(
     if not words:
         prepared = _prepare_bidi_text(wrapped)
         escaped = _escape_ass_text(prepared)
-        return escaped.replace(r"\\N", r"\N")
+        return escaped
 
     words = sorted(set(words), key=len, reverse=True)
     pattern = re.compile(
@@ -243,7 +264,6 @@ def _highlight_ass_text(
         is_highlight = bool(pattern.fullmatch(part))
         prepared = _prepare_bidi_text(part)
         escaped = _escape_ass_text(prepared)
-        escaped = escaped.replace(r"\\N", r"\N")
 
         if is_highlight:
             rendered.append(
@@ -329,7 +349,7 @@ def _normalize_segments(
 
     return _expand_long_segments(
         normalized,
-        max_chars=48,
+        max_chars=40,
     )
 
 
@@ -381,7 +401,7 @@ ScaledBorderAndShadow: yes
 [V4+ Styles]
 Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding
 Style: Hook,DejaVu Sans,56,&H00FFFFFF,&H00FFFFFF,&H80000000,&H80000000,-1,0,0,0,100,100,0,0,3,3,0,8,95,95,120,1
-Style: Caption,DejaVu Sans,48,&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,4,1,2,115,115,190,1
+Style: Caption,DejaVu Sans,46,&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,4,1,2,145,145,235,1
 
 [Events]
 Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
@@ -394,7 +414,7 @@ Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
             duration,
             max(0.5, float(hook_duration)),
         )
-        hook_text = _escape_ass_text(_prepare_bidi_text(_wrap_caption(hook, width=24, max_lines=2)))
+        hook_text = _escape_ass_text(_prepare_bidi_text(_wrap_caption(hook, width=22, max_lines=2)))
         hook_text = hook_text.replace(r"\\N", r"\N")
 
         events.append(
