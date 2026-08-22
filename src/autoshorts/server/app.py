@@ -27,6 +27,7 @@ from ..pipeline import run_pipeline
 from ..download import get_video_path
 from ..export import make_short
 from ..focus import estimate_focus_x, estimate_focus_track
+from ..captions import build_ass_overlay
 from ..publish import publish as publish_dispatch
 from .jobs import Job, ProgressEvent, REGISTRY
 from .models import (
@@ -661,13 +662,37 @@ def _run_render_worker(
                 except Exception:
                     focus_x = None
 
+        # Build one ASS overlay containing Hook + Captions + Highlights.
+        # Subtitle timestamps normally come directly from the YouTube transcript
+        # in absolute source-video time; build_ass_overlay shifts them to the
+        # current Reel automatically.
+        overlay_path = build_ass_overlay(
+            subtitles=[
+                segment.model_dump()
+                for segment in req.subtitles
+            ],
+            output_path=output_dir / "overlay.ass",
+            clip_start=req.start,
+            clip_end=req.end,
+            hook=req.hook,
+            highlight_words=req.highlight_words,
+            timebase=req.subtitle_timebase,
+            hook_duration=req.hook_duration,
+            width=1080,
+            height=1920,
+        )
+
         _update_render_job(
             render_id,
             stage="rendering",
-            message="Rendering 1080x1920 Reel.",
+            message="Rendering final 1080x1920 Reel with overlays.",
             dynamic_focus=bool(focus_track),
             focus_track_points=len(focus_track) if focus_track else 0,
             focus_x=focus_x,
+            hook_burned=bool(req.hook),
+            captions_burned=bool(req.subtitles),
+            subtitle_count=len(req.subtitles),
+            highlight_word_count=len(req.highlight_words),
         )
 
         make_short(
@@ -675,7 +700,7 @@ def _run_render_worker(
             start_sec=req.start,
             end_sec=req.end,
             output_path=output_path,
-            srt_path=None,
+            srt_path=overlay_path,
             width=1080,
             height=1920,
             focus_x=focus_x,
@@ -702,6 +727,11 @@ def _run_render_worker(
             "dynamic_focus": bool(focus_track),
             "focus_track_points": len(focus_track) if focus_track else 0,
             "focus_x": focus_x,
+            "hook_burned": bool(req.hook),
+            "captions_burned": bool(req.subtitles),
+            "subtitle_count": len(req.subtitles),
+            "highlight_words": req.highlight_words,
+            "subtitle_timebase": req.subtitle_timebase,
             "resolution": "1080x1920",
             "url": f"/api/shorts/{run_folder}/{output_path.name}",
         }
@@ -778,6 +808,10 @@ def render_clip(req: RenderRequest) -> dict:
             "dynamic_focus": False,
             "focus_track_points": 0,
             "focus_x": None,
+            "hook_burned": False,
+            "captions_burned": False,
+            "subtitle_count": len(req.subtitles),
+            "highlight_word_count": len(req.highlight_words),
             "result": None,
             "error": None,
         }

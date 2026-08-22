@@ -31,13 +31,46 @@ class StartRunRequest(BaseModel):
     manual_center_bbox: tuple[float, float, float, float] | None = None
 
 
+class SubtitleSegment(BaseModel):
+    """One caption line to burn into the final Reel."""
+
+    start: float = Field(
+        ...,
+        ge=0,
+        description=(
+            "Subtitle start in seconds. By default this is an absolute "
+            "timestamp in the original source video."
+        ),
+    )
+
+    end: float = Field(
+        ...,
+        gt=0,
+        description=(
+            "Subtitle end in seconds. By default this is an absolute "
+            "timestamp in the original source video."
+        ),
+    )
+
+    text: str = Field(
+        ...,
+        min_length=1,
+        description="Exact spoken caption text.",
+    )
+
+
 class RenderRequest(BaseModel):
     """
-    Lightweight render request intended for n8n.
+    Lightweight final-Reel render request intended for n8n.
 
-    This skips Whisper, Ollama, and automatic clip selection.
-    n8n provides the exact start/end timestamps and the video engine
-    only downloads, crops, reframes, and renders the selected segment.
+    n8n provides:
+    - exact clip start/end
+    - optional hook
+    - subtitle lines + timestamps
+    - optional words/phrases to highlight
+
+    AutoAI then performs Smart Crop + speaker tracking + hook + captions
+    in the SAME render and outputs one final reel.mp4.
     """
 
     source: str = Field(
@@ -76,6 +109,43 @@ class RenderRequest(BaseModel):
     ] = "full"
 
     letterbox_full_width: bool = False
+
+    # Final-Reel text overlay fields.
+    hook: str | None = Field(
+        default=None,
+        description="Short stop-scroll hook displayed at the top of the Reel.",
+    )
+
+    hook_duration: float = Field(
+        default=4.0,
+        ge=0.5,
+        le=15.0,
+        description="How many seconds the hook remains visible.",
+    )
+
+    subtitles: list[SubtitleSegment] = Field(
+        default_factory=list,
+        description="Caption segments to burn into the final Reel.",
+    )
+
+    subtitle_timebase: Literal[
+        "source",
+        "clip",
+    ] = Field(
+        default="source",
+        description=(
+            "'source' means subtitle timestamps refer to the original video; "
+            "'clip' means they are already relative to the Reel start."
+        ),
+    )
+
+    highlight_words: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Words or short phrases to emphasize inside captions. "
+            "Matching words are rendered bold with a highlight color."
+        ),
+    )
 
 
 class JobSummary(BaseModel):
