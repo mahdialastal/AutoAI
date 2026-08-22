@@ -677,6 +677,7 @@ def _run_render_worker(
             hook=req.hook,
             highlight_words=req.highlight_words,
             timebase=req.subtitle_timebase,
+            subtitle_offset=req.subtitle_offset,
             hook_duration=req.hook_duration,
             width=1080,
             height=1920,
@@ -692,6 +693,7 @@ def _run_render_worker(
             hook_burned=bool(req.hook),
             captions_burned=bool(req.subtitles),
             subtitle_count=len(req.subtitles),
+            subtitle_offset=req.subtitle_offset,
             highlight_word_count=len(req.highlight_words),
         )
 
@@ -730,6 +732,7 @@ def _run_render_worker(
             "hook_burned": bool(req.hook),
             "captions_burned": bool(req.subtitles),
             "subtitle_count": len(req.subtitles),
+            "subtitle_offset": req.subtitle_offset,
             "highlight_words": req.highlight_words,
             "subtitle_timebase": req.subtitle_timebase,
             "resolution": "1080x1920",
@@ -811,6 +814,7 @@ def render_clip(req: RenderRequest) -> dict:
             "hook_burned": False,
             "captions_burned": False,
             "subtitle_count": len(req.subtitles),
+            "subtitle_offset": req.subtitle_offset,
             "highlight_word_count": len(req.highlight_words),
             "result": None,
             "error": None,
