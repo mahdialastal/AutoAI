@@ -217,15 +217,87 @@ def _expand_long_segments(
     return expanded
 
 
+def _render_bidi_line(
+    line: str,
+    highlight_words: list[str] | None = None,
+) -> str:
+    """
+    Render ONE visual line.
+
+    We never pass the ASS hard line-break token (\\N) through the BiDi
+    processor. This prevents it from being interpreted as literal text.
+    """
+    line = str(line or "").strip()
+    if not line:
+        return ""
+
+    words = [
+        str(word).strip()
+        for word in (highlight_words or [])
+        if str(word).strip()
+    ]
+
+    if not words:
+        return _escape_ass_text(
+            _prepare_bidi_text(line)
+        )
+
+    words = sorted(set(words), key=len, reverse=True)
+
+    pattern = re.compile(
+        "(" + "|".join(re.escape(word) for word in words) + ")",
+        flags=re.IGNORECASE,
+    )
+
+    parts = pattern.split(line)
+    rendered: list[str] = []
+
+    for part in parts:
+        if not part:
+            continue
+
+        prepared = _prepare_bidi_text(part)
+        escaped = _escape_ass_text(prepared)
+
+        if pattern.fullmatch(part):
+            rendered.append(
+                r"{\c&H0000FFFF&\b1}"
+                + escaped
+                + r"{\rCaption}"
+            )
+        else:
+            rendered.append(escaped)
+
+    return "".join(rendered)
+
+
+def _render_multiline_text(
+    value: str,
+    highlight_words: list[str] | None = None,
+) -> str:
+    """
+    Render wrapped text line-by-line, then join using a real ASS \\N token.
+    """
+    lines = str(value or "").split(r"\N")
+
+    rendered_lines = [
+        _render_bidi_line(
+            line,
+            highlight_words=highlight_words,
+        )
+        for line in lines
+        if str(line).strip()
+    ]
+
+    return r"\N".join(rendered_lines)
+
+
 def _highlight_ass_text(
     value: str,
     highlight_words: list[str] | None,
 ) -> str:
     """
-    Render caption text with optional highlighted words.
-
-    Highlight matching happens before Unicode BiDi controls are injected.
-    This keeps words like "Fake" matchable while preserving Arabic order.
+    Wrap captions safely, preserve RTL/LTR, and highlight selected words.
     """
     raw = re.sub(r"\s+", " ", str(value or "")).strip()
     if not raw:
@@ -237,44 +309,10 @@ def _highlight_ass_text(
         max_lines=2,
     )
 
-    words = [
-        str(word).strip()
-        for word in (highlight_words or [])
-        if str(word).strip()
-    ]
-
-    if not words:
-        prepared = _prepare_bidi_text(wrapped)
-        escaped = _escape_ass_text(prepared)
-        return escaped
-
-    words = sorted(set(words), key=len, reverse=True)
-    pattern = re.compile(
-        "(" + "|".join(re.escape(word) for word in words) + ")",
-        flags=re.IGNORECASE,
+    return _render_multiline_text(
+        wrapped,
+        highlight_words=highlight_words,
     )
-
-    parts = pattern.split(wrapped)
-
-    rendered: list[str] = []
-    for part in parts:
-        if not part:
-            continue
-
-        is_highlight = bool(pattern.fullmatch(part))
-        prepared = _prepare_bidi_text(part)
-        escaped = _escape_ass_text(prepared)
-
-        if is_highlight:
-            rendered.append(
-                r"{\c&H0000FFFF&\b1}"
-                + escaped
-                + r"{\rCaption}"
-            )
-        else:
-            rendered.append(escaped)
-
-    return "".join(rendered)
 
 
 def _normalize_segments(
@@ -414,8 +452,14 @@ Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
             duration,
             max(0.5, float(hook_duration)),
         )
-        hook_text = _escape_ass_text(_prepare_bidi_text(_wrap_caption(hook, width=22, max_lines=2)))
-        hook_text = hook_text.replace(r"\\N", r"\N")
+        hook_text = _render_multiline_text(
+            _wrap_caption(
+                hook,
+                width=22,
+                max_lines=2,
+            ),
+            highlight_words=None,
+        )
 
         events.append(
             "Dialogue: 1,"
