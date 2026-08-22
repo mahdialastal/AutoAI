@@ -137,15 +137,64 @@ def _wrap_caption(value: str, width: int = 26, max_lines: int = 2) -> str:
     return r"\N".join(lines[:max_lines])
 
 
+def _caption_profile(
+    text: str,
+    duration: float,
+) -> dict:
+    """
+    Caption Timing Normalizer v2.
+
+    Estimate speaking speed from the timed transcript segment itself and
+    choose a suitable amount of text per on-screen caption.
+
+    No AI rewriting happens here. The original transcript words and the
+    original segment time window are preserved.
+    """
+    clean = re.sub(r"\s+", " ", str(text or "")).strip()
+    words = clean.split()
+    word_count = len(words)
+    duration = max(0.10, float(duration))
+
+    words_per_second = word_count / duration if word_count else 0.0
+
+    # Faster speech -> slightly more frequent caption changes.
+    if words_per_second >= 3.3:
+        target_duration = 1.15
+        max_words = 5
+        max_chars = 30
+    elif words_per_second >= 2.5:
+        target_duration = 1.35
+        max_words = 6
+        max_chars = 34
+    elif words_per_second >= 1.7:
+        target_duration = 1.60
+        max_words = 7
+        max_chars = 38
+    else:
+        target_duration = 1.90
+        max_words = 7
+        max_chars = 40
+
+    return {
+        "words_per_second": words_per_second,
+        "target_duration": target_duration,
+        "max_words": max_words,
+        "max_chars": max_chars,
+    }
+
+
 def _split_text_chunks(
     value: str,
-    max_chars: int = 48,
+    max_words: int = 6,
+    max_chars: int = 34,
 ) -> list[str]:
     """
-    Split a long subtitle into compact readable chunks.
+    Split transcript text into readable chunks without changing its wording.
 
-    This is intentionally word-based. Timing for the chunks is assigned
-    proportionally inside the source caption interval.
+    Preference order:
+    1) punctuation boundary
+    2) word-count limit
+    3) character-width limit
     """
     clean = re.sub(r"\s+", " ", str(value or "")).strip()
     if not clean:
@@ -155,64 +204,138 @@ def _split_text_chunks(
     chunks: list[str] = []
     current: list[str] = []
 
+    def flush() -> None:
+        nonlocal current
+        if current:
+            chunks.append(" ".join(current).strip())
+            current = []
+
     for word in words:
         candidate = " ".join(current + [word])
 
-        if current and len(candidate) > max_chars:
-            chunks.append(" ".join(current))
-            current = [word]
-        else:
-            current.append(word)
+        if current and (
+            len(current) >= max_words
+            or len(candidate) > max_chars
+        ):
+            flush()
 
-    if current:
-        chunks.append(" ".join(current))
+        current.append(word)
 
+        # A natural punctuation boundary is a good place to change captions,
+        # but avoid flashing captions containing only one word.
+        if (
+            len(current) >= 3
+            and re.search(r"[.!?؟,:;]$", word)
+        ):
+            flush()
+
+    flush()
     return chunks
+
+
+def _chunk_weight(text: str) -> float:
+    """
+    Approximate how much of the parent segment's speaking time belongs to
+    this chunk. Word count is primary; character count provides a small
+    correction for long words.
+    """
+    clean = re.sub(r"\s+", " ", str(text or "")).strip()
+    words = clean.split()
+    chars = len(clean.replace(" ", ""))
+
+    return max(
+        1.0,
+        len(words) + (chars * 0.025),
+    )
 
 
 def _expand_long_segments(
     segments: list[dict],
-    max_chars: int = 48,
 ) -> list[dict]:
     """
-    Break long caption text into several short on-screen captions.
+    Adaptive Caption Timing Normalizer v2.
 
-    The original source timing is preserved as a whole, then divided between
-    text chunks by word count. This keeps captions much closer to speech than
-    displaying one long sentence for the entire interval.
+    For each real timed transcript segment:
+    - measure its speech rate,
+    - choose caption density automatically,
+    - split only its original words,
+    - distribute the original timing proportionally,
+    - preserve the parent's exact start/end boundaries.
+
+    This does NOT invent or paraphrase subtitle text.
     """
     expanded: list[dict] = []
 
     for item in segments:
-        text = str(item.get("text", "") or "").strip()
-        chunks = _split_text_chunks(text, max_chars=max_chars)
+        text = re.sub(
+            r"\s+",
+            " ",
+            str(item.get("text", "") or ""),
+        ).strip()
 
-        if len(chunks) <= 1:
-            expanded.append(item)
+        if not text:
             continue
 
         start = float(item["start"])
         end = float(item["end"])
         duration = max(0.08, end - start)
 
-        weights = [max(1, len(chunk.split())) for chunk in chunks]
-        total_weight = sum(weights)
+        profile = _caption_profile(
+            text=text,
+            duration=duration,
+        )
 
-        cursor = start
-        for i, (chunk, weight) in enumerate(zip(chunks, weights)):
-            if i == len(chunks) - 1:
-                chunk_end = end
-            else:
-                chunk_end = cursor + duration * (weight / total_weight)
+        chunks = _split_text_chunks(
+            text,
+            max_words=profile["max_words"],
+            max_chars=profile["max_chars"],
+        )
 
+        if len(chunks) <= 1:
             expanded.append(
                 {
-                    "start": cursor,
-                    "end": chunk_end,
-                    "text": chunk,
+                    "start": start,
+                    "end": end,
+                    "text": text,
                 }
             )
+            continue
+
+        weights = [_chunk_weight(chunk) for chunk in chunks]
+        total_weight = sum(weights) or 1.0
+
+        cursor = start
+
+        for index, (chunk, weight) in enumerate(
+            zip(chunks, weights)
+        ):
+            if index == len(chunks) - 1:
+                chunk_end = end
+            else:
+                share = duration * (weight / total_weight)
+                chunk_end = min(end, cursor + share)
+
+            # Prevent extremely short flashes. If there is not enough room,
+            # the final chunk still closes exactly at the parent end.
+            if (
+                index < len(chunks) - 1
+                and chunk_end - cursor < 0.45
+            ):
+                chunk_end = min(end, cursor + 0.45)
+
+            if chunk_end > cursor + 0.08:
+                expanded.append(
+                    {
+                        "start": cursor,
+                        "end": chunk_end,
+                        "text": chunk,
+                    }
+                )
+
             cursor = chunk_end
+
+            if cursor >= end:
+                break
 
     return expanded
 
@@ -387,7 +510,6 @@ def _normalize_segments(
 
     return _expand_long_segments(
         normalized,
-        max_chars=40,
     )
 
 
