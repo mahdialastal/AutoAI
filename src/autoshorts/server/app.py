@@ -831,24 +831,14 @@ def get_render_status(render_id: str) -> dict:
 
 
 
-@app.delete("/api/render/{render_id}")
-def cleanup_render(render_id: str) -> dict:
+def _cleanup_render_output(render_id: str) -> dict:
     """
-    Delete temporary files for a completed/failed lightweight render job.
+    Delete ONLY the generated output for one completed/failed render job.
 
-    Intended flow:
-        1. n8n waits until status == "done"
-        2. n8n downloads reel.mp4
-        3. n8n uploads it to Google Drive
-        4. n8n calls this endpoint
-
-    Cleanup removes:
-    - GENERATED/<run_folder>/ and its reel.mp4
-    - the downloaded source file when it lives under DOWNLOADS and no
-      other queued/running render job is currently using that same file
-    - the in-memory render job entry
-
-    Running/queued jobs cannot be deleted.
+    Important:
+    - Does NOT delete the downloaded YouTube source.
+    - Safe to call after n8n uploads the final Reel to Google Drive.
+    - Removes the render job from the in-memory registry after cleanup.
     """
     with _RENDER_JOBS_LOCK:
         job = _RENDER_JOBS.get(render_id)
@@ -870,22 +860,8 @@ def cleanup_render(render_id: str) -> dict:
         run_folder = job.get("run_folder")
         source_path_raw = job.get("source_path")
 
-        # Snapshot other active source paths before removing the job.
-        active_source_paths = {
-            str(other.get("source_path"))
-            for other_id, other in _RENDER_JOBS.items()
-            if (
-                other_id != render_id
-                and other.get("status") in ("queued", "running")
-                and other.get("source_path")
-            )
-        }
-
     removed_generated = False
-    removed_source = False
-    skipped_source_in_use = False
 
-    # Remove generated Reel folder.
     if run_folder:
         output_dir = (GENERATED / str(run_folder)).resolve()
 
@@ -901,24 +877,8 @@ def cleanup_render(render_id: str) -> dict:
             shutil.rmtree(output_dir)
             removed_generated = True
 
-    # Remove downloaded source only when it is actually inside DOWNLOADS.
-    if source_path_raw:
-        source_path = Path(str(source_path_raw)).resolve()
-
-        try:
-            source_path.relative_to(DOWNLOADS.resolve())
-            source_is_temp_download = True
-        except ValueError:
-            source_is_temp_download = False
-
-        if source_is_temp_download and source_path.is_file():
-            if str(source_path) in active_source_paths:
-                skipped_source_in_use = True
-            else:
-                source_path.unlink()
-                removed_source = True
-
-    # Remove registry entry only after filesystem cleanup succeeds.
+    # Remove the finished render job entry, but deliberately keep the
+    # downloaded source file for the remaining Reels in the source loop.
     with _RENDER_JOBS_LOCK:
         _RENDER_JOBS.pop(render_id, None)
 
@@ -926,9 +886,158 @@ def cleanup_render(render_id: str) -> dict:
         "ok": True,
         "render_id": render_id,
         "cleaned": True,
+        "cleanup_type": "output_only",
         "removed_generated": removed_generated,
-        "removed_source": removed_source,
-        "skipped_source_in_use": skipped_source_in_use,
+        "removed_source": False,
+        "source_preserved": bool(source_path_raw),
+    }
+
+
+@app.delete("/api/render/{render_id}/output")
+def cleanup_render_output(render_id: str) -> dict:
+    """
+    Delete only this Reel's generated output.
+
+    Intended n8n flow for EACH Reel:
+        Render -> Download final Reel -> Upload to Google Drive
+        -> DELETE /api/render/{render_id}/output
+
+    The long YouTube source remains in /app/downloads for the next Reel.
+    """
+    return _cleanup_render_output(render_id)
+
+
+@app.delete("/api/render/{render_id}")
+def cleanup_render_legacy(render_id: str) -> dict:
+    """
+    Backward-compatible cleanup route.
+
+    IMPORTANT:
+    This route now behaves as OUTPUT-ONLY cleanup and no longer deletes
+    the downloaded source video.
+
+    New workflows should use:
+        DELETE /api/render/{render_id}/output
+    """
+    result = _cleanup_render_output(render_id)
+    result["deprecated_route"] = True
+    result["recommended_route"] = f"/api/render/{render_id}/output"
+    return result
+
+
+def _validate_source_id(source_id: str) -> str:
+    """
+    Validate a source identifier before using it to locate temp downloads.
+
+    YouTube video IDs use letters, numbers, '_' and '-'. We allow a slightly
+    wider length range so the endpoint remains useful for compatible sources,
+    while blocking path traversal and arbitrary filesystem access.
+    """
+    value = str(source_id or "").strip()
+
+    if not re.fullmatch(r"[A-Za-z0-9_-]{6,64}", value):
+        raise HTTPException(
+            status_code=422,
+            detail="Invalid source_id",
+        )
+
+    return value
+
+
+@app.delete("/api/source/{source_id}")
+def cleanup_source(source_id: str) -> dict:
+    """
+    Delete the downloaded long-form source AFTER all Reels are complete.
+
+    Intended n8n flow:
+        1. Download/use source once
+        2. Produce all Reels from the same source
+        3. Upload each Reel to Google Drive and clean each output
+        4. After the loop finishes:
+           DELETE /api/source/{source_id}
+
+    Safety:
+    - Only files directly inside DOWNLOADS whose filename stem exactly equals
+      source_id are eligible.
+    - Refuses deletion while a queued/running render job is using that source.
+    """
+    safe_source_id = _validate_source_id(source_id)
+    downloads_root = DOWNLOADS.resolve()
+
+    candidate_files: list[Path] = []
+
+    if DOWNLOADS.is_dir():
+        for candidate in DOWNLOADS.iterdir():
+            if not candidate.is_file():
+                continue
+
+            resolved = candidate.resolve()
+
+            try:
+                resolved.relative_to(downloads_root)
+            except ValueError:
+                continue
+
+            if candidate.stem == safe_source_id:
+                candidate_files.append(resolved)
+
+    # Check active jobs before deleting anything.
+    with _RENDER_JOBS_LOCK:
+        active_jobs = [
+            {
+                "render_id": render_id,
+                "source_path": str(job.get("source_path") or ""),
+            }
+            for render_id, job in _RENDER_JOBS.items()
+            if job.get("status") in ("queued", "running")
+        ]
+
+    candidate_strings = {str(path) for path in candidate_files}
+    active_using_source = [
+        job["render_id"]
+        for job in active_jobs
+        if job["source_path"] in candidate_strings
+    ]
+
+    if active_using_source:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "Source is still being used by an active render job",
+                "active_render_ids": active_using_source,
+            },
+        )
+
+    removed_files: list[str] = []
+
+    for candidate in candidate_files:
+        candidate.unlink()
+        removed_files.append(candidate.name)
+
+    # Remove any completed/failed registry entries that still reference the
+    # source being cleaned. Running/queued jobs were already protected above.
+    with _RENDER_JOBS_LOCK:
+        stale_render_ids = [
+            render_id
+            for render_id, job in _RENDER_JOBS.items()
+            if (
+                job.get("status") not in ("queued", "running")
+                and str(job.get("source_path") or "") in candidate_strings
+            )
+        ]
+
+        for render_id in stale_render_ids:
+            _RENDER_JOBS.pop(render_id, None)
+
+    return {
+        "ok": True,
+        "source_id": safe_source_id,
+        "cleaned": True,
+        "cleanup_type": "source_only",
+        "removed_source": bool(removed_files),
+        "removed_files": removed_files,
+        "removed_file_count": len(removed_files),
+        "active_render_ids": [],
     }
 
 
