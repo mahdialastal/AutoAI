@@ -261,84 +261,154 @@ def _parse_json3_transcript(payload: dict) -> list[dict]:
     return segments
 
 
-def _pick_caption_track(
+def _is_usable_caption_language(code: str | None) -> bool:
+    """Reject non-speech pseudo-tracks such as YouTube live chat."""
+    if not code:
+        return False
+
+    normalized = str(code).strip().lower().replace("_", "-")
+    if not normalized:
+        return False
+
+    blocked_exact = {
+        "live-chat",
+        "live_chat",
+        "chat",
+        "comments",
+        "comment",
+    }
+    if normalized in blocked_exact:
+        return False
+
+    blocked_parts = (
+        "live-chat",
+        "live_chat",
+        "chat-replay",
+        "chat_replay",
+        "comments",
+    )
+    return not any(part in normalized for part in blocked_parts)
+
+
+def _caption_track_candidates(
     info: dict,
     requested_language: str | None = None,
-) -> tuple[str, str, list[dict]] | None:
+) -> list[tuple[str, str, list[dict]]]:
     """
-    Pick the best available YouTube transcript track.
+    Return ordered caption-track candidates instead of stopping at the first
+    subtitle key.
+
+    This is important because YouTube/yt-dlp may expose pseudo subtitle tracks
+    such as ``live_chat`` under manual subtitles. Those tracks are not spoken
+    captions and usually do not contain json3 timing data.
 
     Priority:
-    1. Human subtitles
+    1. Human/manual subtitles
     2. Automatic captions
 
     Within each group:
-    - explicitly requested language
+    - explicitly requested language, when supplied
     - video's declared language
-    - English/French
-    - first available language
+    - English/French defaults used by this project
+    - every other usable language
 
-    Returns: (track_type, language_code, formats)
+    Non-speech pseudo-tracks are excluded.
     """
-    requested = (requested_language or "").strip().lower()
-    video_language = str(info.get("language") or "").strip().lower()
+    requested = (requested_language or "").strip().lower().replace("_", "-")
+    video_language = (
+        str(info.get("language") or "")
+        .strip()
+        .lower()
+        .replace("_", "-")
+    )
 
     groups = (
         ("manual", info.get("subtitles") or {}),
         ("automatic", info.get("automatic_captions") or {}),
     )
 
+    ordered: list[tuple[str, str, list[dict]]] = []
+
     for track_type, tracks in groups:
         if not tracks:
             continue
 
-        available = list(tracks.keys())
+        # Map normalized codes back to their exact yt-dlp keys.
+        exact_by_normalized: dict[str, str] = {}
+        usable_codes: list[str] = []
+        for raw_code in tracks.keys():
+            if not _is_usable_caption_language(raw_code):
+                continue
+            normalized = str(raw_code).strip().lower().replace("_", "-")
+            if normalized and normalized not in exact_by_normalized:
+                exact_by_normalized[normalized] = raw_code
+                usable_codes.append(raw_code)
+
         candidates: list[str] = []
 
-        def add_candidate(code: str) -> None:
-            if code and code in tracks and code not in candidates:
-                candidates.append(code)
+        def add_exact(raw_code: str | None) -> None:
+            if not raw_code:
+                return
+            if raw_code in tracks and _is_usable_caption_language(raw_code):
+                if raw_code not in candidates:
+                    candidates.append(raw_code)
 
-        # Exact requested language first.
-        add_candidate(requested)
+        def add_normalized(code: str | None) -> None:
+            if not code:
+                return
+            normalized = str(code).strip().lower().replace("_", "-")
+            raw_code = exact_by_normalized.get(normalized)
+            if raw_code:
+                add_exact(raw_code)
 
-        # Then variants such as en-US for requested "en", or fr-FR for "fr".
-        if requested:
-            requested_base = requested.split("-", 1)[0]
-            for code in available:
-                code_lower = code.lower()
-                if (
-                    code_lower == requested_base
-                    or code_lower.startswith(requested_base + "-")
-                ):
-                    add_candidate(code)
+        def add_language_family(code: str | None) -> None:
+            if not code:
+                return
+            normalized = str(code).strip().lower().replace("_", "-")
+            if not normalized:
+                return
+            base = normalized.split("-", 1)[0]
 
-        # Prefer video's own language.
-        add_candidate(video_language)
-        if video_language:
-            video_base = video_language.split("-", 1)[0]
-            for code in available:
-                code_lower = code.lower()
-                if (
-                    code_lower == video_base
-                    or code_lower.startswith(video_base + "-")
-                ):
-                    add_candidate(code)
+            # Exact/base code before regional variants.
+            add_normalized(normalized)
+            add_normalized(base)
 
-        # Useful defaults for the current France/USA workflow.
-        for preferred in ("en", "en-US", "en-GB", "fr", "fr-FR"):
-            add_candidate(preferred)
+            for raw_code in usable_codes:
+                raw_normalized = (
+                    str(raw_code).strip().lower().replace("_", "-")
+                )
+                if raw_normalized.startswith(base + "-"):
+                    add_exact(raw_code)
 
-        for code in available:
-            add_candidate(code)
+        add_language_family(requested)
+        add_language_family(video_language)
 
-        if candidates:
-            language_code = candidates[0]
+        # Useful defaults for the current USA/France workflows.
+        for preferred in ("en-US", "en", "en-GB", "fr-FR", "fr"):
+            add_language_family(preferred)
+
+        # Finally consider every remaining real caption language.
+        for raw_code in usable_codes:
+            add_exact(raw_code)
+
+        for language_code in candidates:
             formats = tracks.get(language_code) or []
             if formats:
-                return track_type, language_code, formats
+                ordered.append((track_type, language_code, formats))
 
-    return None
+    return ordered
+
+
+def _pick_caption_track(
+    info: dict,
+    requested_language: str | None = None,
+) -> tuple[str, str, list[dict]] | None:
+    """Backward-compatible helper returning the first usable track candidate."""
+    candidates = _caption_track_candidates(
+        info,
+        requested_language=requested_language,
+    )
+    return candidates[0] if candidates else None
 
 
 def _pick_json3_format(formats: list[dict]) -> dict | None:
@@ -350,6 +420,27 @@ def _pick_json3_format(formats: list[dict]) -> dict | None:
     return None
 
 
+def _download_json3_segments(caption_format: dict) -> list[dict]:
+    """Download one json3 caption URL and return normalized speech segments."""
+    request = urllib.request.Request(
+        caption_format["url"],
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/130.0.0.0 Safari/537.36"
+            ),
+            "Accept": "application/json,text/plain,*/*",
+        },
+    )
+
+    with urllib.request.urlopen(request, timeout=30) as response:
+        raw = response.read()
+
+    payload = json.loads(raw.decode("utf-8"))
+    return _parse_json3_transcript(payload)
+
+
 def _fetch_youtube_transcript(
     source: str,
     expected_language: str | None = None,
@@ -357,6 +448,16 @@ def _fetch_youtube_transcript(
     """
     Read a transcript directly from YouTube without downloading the video
     and without running Whisper.
+
+    Track selection is deliberately resilient:
+    - ignore pseudo-tracks such as ``live_chat``
+    - try real manual subtitle tracks first
+    - then try automatic caption tracks
+    - if one track has no json3 format or yields no usable speech, continue to
+      the next candidate instead of failing the whole transcript request
+
+    ``expected_language`` remains validation-only; it does not force a caption
+    track. The video's declared language is used to rank real caption tracks.
     """
     cookie_file = os.getenv("YTDLP_COOKIES_FILE", "").strip()
 
@@ -379,18 +480,16 @@ def _fetch_youtube_transcript(
     video_id = str(info.get("id") or "")
     title = str(info.get("title") or "")
     duration = info.get("duration")
+    metadata_language = str(info.get("language") or "").strip() or None
 
-    # Always auto-select the transcript language from YouTube metadata.
-    # expected_language is validation-only; it does not force another
-    # subtitle track and therefore avoids accidental language conflicts.
-    picked = _pick_caption_track(
+    # expected_language is intentionally NOT passed here. It validates the
+    # final result but does not force another subtitle language.
+    track_candidates = _caption_track_candidates(
         info,
         requested_language=None,
     )
 
-    metadata_language = str(info.get("language") or "").strip() or None
-
-    if picked is None:
+    if not track_candidates:
         return {
             "ok": True,
             "available": False,
@@ -406,27 +505,60 @@ def _fetch_youtube_transcript(
                 expected_language,
             ),
             "track_type": None,
+            "reason": "No usable spoken-caption track was found.",
             "segments": [],
             "segment_count": 0,
             "full_text": "",
             "timestamped_text": "",
         }
 
-    track_type, language_code, formats = picked
+    attempted_tracks: list[str] = []
+    last_reason = "No usable timestamped transcript track was found."
 
-    # Prefer YouTube's declared original video language. If it is missing,
-    # fall back to the selected transcript track language.
-    detected_language = metadata_language or language_code
+    for track_type, language_code, formats in track_candidates:
+        attempted_tracks.append(f"{track_type}:{language_code}")
 
-    caption_format = _pick_json3_format(formats)
+        caption_format = _pick_json3_format(formats)
+        if caption_format is None:
+            last_reason = (
+                f"Caption track {track_type}:{language_code} exists but has "
+                "no json3 timestamp format."
+            )
+            continue
 
-    if caption_format is None:
-        # We deliberately require timestamp-rich json3 for this workflow.
-        # If YouTube exposes captions but no json3 variant, treat the
-        # transcript as unusable instead of inventing/improvising timing.
+        try:
+            segments = _download_json3_segments(caption_format)
+        except Exception as exc:
+            last_reason = (
+                f"Caption track {track_type}:{language_code} could not be "
+                f"downloaded or parsed: {exc}"
+            )
+            continue
+
+        if not segments:
+            last_reason = (
+                f"Caption track {track_type}:{language_code} contained no "
+                "usable speech segments."
+            )
+            continue
+
+        # Prefer YouTube's declared original language for validation metadata,
+        # but report the actual selected caption-track code in `language`.
+        detected_language = metadata_language or language_code
+
+        full_text = "\n".join(
+            segment["text"]
+            for segment in segments
+        )
+
+        timestamped_text = "\n".join(
+            f'[{_format_timestamp(segment["start"])}] {segment["text"]}'
+            for segment in segments
+        )
+
         return {
             "ok": True,
-            "available": False,
+            "available": True,
             "source": source,
             "video_id": video_id,
             "title": title,
@@ -439,83 +571,34 @@ def _fetch_youtube_transcript(
                 expected_language,
             ),
             "track_type": track_type,
-            "reason": "Transcript exists but no json3 timestamp format is available.",
-            "segments": [],
-            "segment_count": 0,
-            "full_text": "",
-            "timestamped_text": "",
+            "segment_count": len(segments),
+            "segments": segments,
+            "full_text": full_text,
+            "timestamped_text": timestamped_text,
         }
 
-    request = urllib.request.Request(
-        caption_format["url"],
-        headers={
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/130.0.0.0 Safari/537.36"
-            ),
-            "Accept": "application/json,text/plain,*/*",
-        },
-    )
-
-    with urllib.request.urlopen(request, timeout=30) as response:
-        raw = response.read()
-
-    payload = json.loads(raw.decode("utf-8"))
-    segments = _parse_json3_transcript(payload)
-
-    if not segments:
-        return {
-            "ok": True,
-            "available": False,
-            "source": source,
-            "video_id": video_id,
-            "title": title,
-            "duration": duration,
-            "language": language_code,
-            "detected_language": detected_language,
-            "expected_language": expected_language,
-            "language_match": _language_match(
-                detected_language,
-                expected_language,
-            ),
-            "track_type": track_type,
-            "reason": "Caption track was found but contained no usable speech segments.",
-            "segments": [],
-            "segment_count": 0,
-            "full_text": "",
-            "timestamped_text": "",
-        }
-
-    full_text = "\n".join(
-        segment["text"]
-        for segment in segments
-    )
-
-    timestamped_text = "\n".join(
-        f'[{_format_timestamp(segment["start"])}] {segment["text"]}'
-        for segment in segments
-    )
-
+    # Real caption tracks existed, but none produced timestamp-rich json3 data.
     return {
         "ok": True,
-        "available": True,
+        "available": False,
         "source": source,
         "video_id": video_id,
         "title": title,
         "duration": duration,
-        "language": language_code,
-        "detected_language": detected_language,
+        "language": None,
+        "detected_language": metadata_language,
         "expected_language": expected_language,
         "language_match": _language_match(
-            detected_language,
+            metadata_language,
             expected_language,
         ),
-        "track_type": track_type,
-        "segment_count": len(segments),
-        "segments": segments,
-        "full_text": full_text,
-        "timestamped_text": timestamped_text,
+        "track_type": None,
+        "reason": last_reason,
+        "attempted_tracks": attempted_tracks,
+        "segments": [],
+        "segment_count": 0,
+        "full_text": "",
+        "timestamped_text": "",
     }
 
 
