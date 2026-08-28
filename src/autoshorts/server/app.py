@@ -30,6 +30,7 @@ from ..focus import estimate_focus_x, estimate_focus_track
 from ..captions import build_ass_overlay
 from ..publish import publish as publish_dispatch
 from .jobs import Job, ProgressEvent, REGISTRY
+from .post_frames_api import router as post_frames_router
 from .models import (
     JobSummary,
     PresetSummary,
@@ -54,6 +55,8 @@ DOWNLOADS.mkdir(parents=True, exist_ok=True)
 
 
 app = FastAPI(title="MarkSoft AutoShorts", version="0.2.0")
+
+app.include_router(post_frames_router)
 
 # For dev we'll typically run the Vite dev server on :5173 and FastAPI on :8000.
 # Same-origin in production (FastAPI serves the built assets).
