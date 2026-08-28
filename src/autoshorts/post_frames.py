@@ -382,6 +382,8 @@ def download_post_clip(
                 "-m",
                 "yt_dlp",
                 "--no-playlist",
+                "--remote-components",
+                "ejs:github",
                 "--download-sections",
                 section,
                 "--force-keyframes-at-cuts",
